@@ -92,9 +92,11 @@ def main():
         if "slices" not in st.session_state:
             st.session_state.slices = load_dicom_files(uploaded_files)
         slices = st.session_state.slices
+        # slices = load_dicom_files(uploaded_files)
         if "scores" not in st.session_state:
             st.session_state.scores = model.predict(slices)
         scores = st.session_state.scores
+        # scores = model.predict(slices)
         
         if len(slices) > 0:
             slice_idx = st.slider("Select Slice", min_value=0, max_value=len(slices) - 1, value=0, step=1)

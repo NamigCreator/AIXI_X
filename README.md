@@ -64,6 +64,8 @@ ids, preds, patient_ids, patient_preds = model.predict(folder=folder, ids=ids)
 
 ## Streamlit
 
+For running this example you should place "best.ckpt" checkpoint file into folder "./res/checkpoints/2d_11_seresnext50_lr1-4/".
+
 ```bash
 python3 -m streamlit run ./classification/viz.py
 ```
