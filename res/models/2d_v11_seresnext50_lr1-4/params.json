@@ -1,0 +1,22 @@
+{
+    "mode": "2d_multichannel",
+    "n_epochs": 40,
+    "batch_size": 32,
+    "dataset": {
+        "image_size": [
+            256,
+            256
+        ],
+        "brain_window_center": 40,
+        "brain_window_width": 80,
+        "subdural_window_center": 80,
+        "subdural_window_width": 200,
+        "soft_window_center": 40,
+        "soft_window_width": 380
+    },
+    "filters": [
+        "brain_present"
+    ],
+    "model_arch": "se_resnext50_32x4d",
+    "lr": 0.0001
+}
