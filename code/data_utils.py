@@ -1,5 +1,5 @@
 from torch.utils.data import DataLoader, Dataset
-from lightning import LightningDataModule
+from pytorch_lightning import LightningDataModule
 
 import numpy as np
 import cv2 as cv
@@ -103,16 +103,17 @@ class CTBrainDataset(Dataset):
         image = normalize_minmax(image)
         image = image * 255  # seems that canny filter needs uint8
         image = image.astype(np.uint8)
-        image = cv.cvtColor(image, cv.COLOR_GRAY2RGB)
+        # image = cv.cvtColor(image, cv.COLOR_GRAY2RGB)
 
         edges = {}
-        for threshold in [120, 170, 200]:
+        for threshold in [120]:
             canny = apply_canny(image, maxVal=threshold)
             canny = torch.Tensor(canny).unsqueeze(0)  # (1, H, W)
             edges[threshold] = canny
 
-        image = torch.Tensor(image)
-        image = torch.moveaxis(image, -1, 0)  # (H, W, 3) -> (3, H, W)
+        image = torch.from_numpy(image).float() #from uint to float
+        image = image.unsqueeze(0)
+        # image = torch.moveaxis(image, -1, 0)  # (H, W, 3) -> (3, H, W)
         image = image / 255
 
         return (image, edges, label, name)
@@ -156,6 +157,7 @@ def read_image(fname):
 
 def apply_canny(img, minVal=100, maxVal=200):
     canny = cv.Canny(img, 100, 200)
+    canny = canny / 255
     return canny
 
 
@@ -180,33 +182,30 @@ def load_json(fname):
         return pickle.load(fin)
 
 
-# if __name__ == "__main__":
+if __name__ == "__main__":
 
-#     img_dir = "/home/markzaretckii/Desktop/br/data/train_npy_subset_005"
-#     info_table = "/home/markzaretckii/Desktop/br/data/split_subset_005.pkl"
+    img_dir = "data/train_npy_subset_005"
+    info_table = "data/split_subset_005.pkl"
 
-#     d = CTBrainDataset(
-#         img_dir=img_dir,
-#         info_table=info_table,
-#         subset="val",
-#     )
+    d = CTBrainDataset(
+        img_dir=img_dir,
+        info_table=info_table,
+        subset="val",
+    )
 
-    # m = CTBrainDataModule(img_dir=img_dir, info_table=info_table)
-    # m.setup(stage="fit")
-    # dl = m.val_dataloader()
-    # for b in dl:
-    #     x_true, edges, target, name = b
-    #     if name[0] in anomalies:
-    #         print("Im here ", name[0])
+    for b in d:
+        print(b[0].shape)
+        print(b[0].max())
+        print(b[0].min())
+        break
 
-    #     break
-
-    # img = np.load(
-    #     "/home/maestro/Desktop/brain/data/train_npy_subset_005/ID_ffffb670a.npy"
-    # )
-    # img = img[:90, :90]
-    # img = img.reshape(3, 90, -1)
-    # print(img.shape)
-    # img = normalize_minmax(img)
-    # img = img.astype(np.uint8)
-    # apply_canny(img)
+    m = CTBrainDataModule(img_dir=img_dir, info_table=info_table)
+    m.setup(stage="fit")
+    dl = m.train_dataloader()
+    for b in dl:
+        x_true, edges, target, name = b
+        if x_true.max() > 1 or x_true.min() < 0:
+            print("somegthing strange")
+        for k, e in edges.items():
+            if e.max() > 1 or e.min() < 0:
+                print("something strange with aedge")

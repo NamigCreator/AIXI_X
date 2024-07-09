@@ -9,7 +9,7 @@ class Autoencoder(nn.Module):
     def __init__(self):
         super(Autoencoder, self).__init__()
         self.encoder = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
             nn.Conv2d(16, 8, kernel_size=3, stride=1, padding=1),
@@ -22,7 +22,7 @@ class Autoencoder(nn.Module):
             ),
             nn.ReLU(),
             nn.ConvTranspose2d(
-                16, 3, kernel_size=3, stride=2, padding=1, output_padding=1
+                16, 1, kernel_size=3, stride=2, padding=1, output_padding=1
             ),
             nn.Sigmoid(),
         )
@@ -37,7 +37,7 @@ class Generator(nn.Module):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.downscaling = nn.Sequential(
-            ConvBlock(in_channels=6, out_channels=64, kernel_size=7, stride=1),
+            ConvBlock(in_channels=2, out_channels=64, kernel_size=7, stride=1),
             ConvBlock(in_channels=64, out_channels=128, kernel_size=4, stride=2),
             ConvBlock(in_channels=128, out_channels=256, kernel_size=4, stride=2),
         )
@@ -68,7 +68,7 @@ class Generator(nn.Module):
                 output_padding=1,
             ),
             ConvBlock(
-                in_channels=64, out_channels=3, kernel_size=7, stride=1, last_layer=True
+                in_channels=64, out_channels=1, kernel_size=7, stride=1, last_layer=True
             ),
         )
 
@@ -161,7 +161,7 @@ class Descriminator(nn.Module):
     def __init__(self):
         super(Descriminator, self).__init__()
         self.encoder = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2),
             nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),

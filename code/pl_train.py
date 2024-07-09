@@ -1,16 +1,18 @@
-from lightning import Trainer, LightningModule
+# from lightning import Trainer, LightningModule
+# from lightning.pytorch.loggers import NeptuneLogger
 
-# from pytorch_lightning import Trainer, LightningModule
-
-from lightning.pytorch.loggers import NeptuneLogger
-
-# from pytorch_lightning.loggers import NeptuneLogger
+from pytorch_lightning import Trainer, LightningModule
+from pytorch_lightning.loggers import NeptuneLogger
+from pytorch_lightning.callbacks import LearningRateMonitor
 
 from neptune.types import File
 
 import torch
+
+torch.set_float32_matmul_precision("medium")
 import torch.nn.functional as F
 from torch.optim import AdamW, SGD
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import random
 
 import sys
@@ -55,7 +57,7 @@ class Model(LightningModule):
         mask = self.get_random_mask(x_true, mask_size)
         x_masked = x_true * mask
 
-        x_true_w_edges = self.concat_image_and_edges(x_masked, edges) #TODO apply mask after concat!?
+        x_true_w_edges = self.concat_image_and_edges(x_masked, edges)
         x_reconstructed = self.generator(x_true_w_edges)
 
         losses = self.calculate_losses(x_true, x_reconstructed)
@@ -88,14 +90,17 @@ class Model(LightningModule):
 
         if batch_idx % 100 == 0:
             self.__log_image(x_true, "training/real_images")
-            # first edge
+            # edge
             self.__log_image(x_true_w_edges[:, -1, :, :], "training/edges_1")
-            # second edge
-            self.__log_image(x_true_w_edges[:, -2, :, :], "training/edges_2")
-            # third edge
-            self.__log_image(x_true_w_edges[:, -3, :, :], "training/edges_3")
             self.__log_image(x_masked, "training/masked_images", mask=mask)
             self.__log_image(x_reconstructed, "training/reconstructed_images")
+
+        ### lr scheduler
+        if self.trainer.is_last_batch:
+            self.scheduler_g.step(self.trainer.callback_metrics["g_loss"])
+            self.scheduler_d.step(self.trainer.callback_metrics["d_loss"])
+
+
 
     def __log_image(self, x, folder, mask=None, choose_random=False):
         """log first image from batch"""
@@ -106,8 +111,13 @@ class Model(LightningModule):
         img = x[img_idx]
         img = img.cpu()
         if mask is not None:
+            # make rgb from grayscale
+            img = img.repeat(3, 1, 1)
             mask = mask[img_idx]
             mask = mask.cpu()
+            if mask.shape[0] == 1:
+                # make rgb from grayscale
+                mask = mask.repeat(3, 1, 1)
             # invert zeros to ones
             red_mask = torch.ones_like(mask) - mask
             # zerofy green and blue channels
@@ -141,8 +151,17 @@ class Model(LightningModule):
             params=self.generator.parameters(), lr=0.01, momentum=0.9, weight_decay=5e-4
         )
         self.d_opt = SGD(
-            params=self.generator.parameters(), lr=0.01, momentum=0.9, weight_decay=5e-4
+            params=self.descriminator.parameters(), lr=0.01, momentum=0.9, weight_decay=5e-4
         )
+
+        self.scheduler_g = ReduceLROnPlateau(
+            self.g_opt, mode="min", factor=0.1, patience=5, min_lr=5e-6
+        )
+
+        self.scheduler_d = ReduceLROnPlateau(
+            self.d_opt, mode="min", factor=0.1, patience=5, min_lr=5e-6
+        )
+
         return self.g_opt, self.d_opt
 
     def gram_matrix(self, input):
@@ -162,6 +181,9 @@ class Model(LightningModule):
         return F.l1_loss(self.gram_matrix(x_true), self.gram_matrix(x_rec))
 
     def perceptual_loss(self, x_true, x_rec):
+        # vgg19 takes 3 channels as input
+        x_true = x_true.repeat(1, 3, 1, 1)
+        x_rec = x_rec.repeat(1, 3, 1, 1)
         intermediate_layers_true = self.vgg19(x_true)
         intermediate_layers_rec = self.vgg19(x_rec)
         loss = torch.tensor([0.0], requires_grad=True).to("cuda")
@@ -197,8 +219,6 @@ class Model(LightningModule):
         rows = cols = x.shape[2]
 
         for i in range(mask.shape[0]):
-            # top_left_x = random.randint(0, rows - mask_size + 1)
-            # top_left_y = random.randint(0, cols - mask_size + 1)
             top_left_x = random.randint(rows // 2 - rows // 4, rows // 2 + rows // 4)
             top_left_y = random.randint(cols // 2 - cols // 4, cols // 2 + cols // 4)
 
@@ -239,17 +259,17 @@ class Model(LightningModule):
         x_true, edges, target, name = batch
         N, C, H, W = x_true.shape
         # mask has shape ((H // K) * (W // K), C, H, W)
-        mask = self.get_mask_grid(x_true, K=32)
+        mask = self.get_mask_grid(x_true, K=16)
         x_masked = x_true.repeat(mask.shape[0], 1, 1, 1)
         mask = mask.repeat(N, 1, 1, 1)
         mask = mask.to(x_true.device)
         x_masked = x_masked * mask
-        x_masked_w_edges = self.concat_image_and_edges(x_masked, edges) #TODO apply mask after concat?
+        x_masked_w_edges = self.concat_image_and_edges(x_masked, edges)
         x_reconstructed = self.generator(x_masked_w_edges)
         # zerofy everything except masked region
-        x_reconstructed = (~mask) * x_reconstructed
+        x_reconstructed = (torch.ones_like(mask) - mask) * x_reconstructed
 
-        x_reconstructed = x_reconstructed.view(N, -1, C, H, W).mean(1)
+        x_reconstructed = x_reconstructed.view(N, -1, C, H, W).sum(1)
         losses = self.calculate_losses(x_true, x_reconstructed)
 
         # works only for batch size 1
@@ -263,7 +283,7 @@ class Model(LightningModule):
 
         rec_loss = losses["reconstruction_loss"]
         losses[f"reconstruction_loss_class:{int(target.item())}"] = rec_loss.item()
-        self.log_dict(losses, prog_bar=True, on_step=True)
+        self.log_dict(losses, prog_bar=True)
 
     def on_validation_epoch_end(self):
         print("self stsh: ", len(self.stash))
@@ -297,6 +317,8 @@ class Model(LightningModule):
         }
 
 
+
+
 from pathlib import Path
 
 if __name__ == "__main__":
@@ -306,7 +328,7 @@ if __name__ == "__main__":
     img_dir = proj_dir.joinpath("data/train_npy_subset_005")
     info_table = proj_dir.joinpath("data/split_subset_005.pkl")
     datamodule = CTBrainDataModule(
-        img_dir=img_dir, info_table=info_table, batch_size=16
+        img_dir=img_dir, info_table=info_table, batch_size=32
     )
 
     logger = NeptuneLogger(
@@ -316,12 +338,14 @@ if __name__ == "__main__":
     )
 
     model = Model()
+    lr_monitor = LearningRateMonitor(logging_interval="epoch")
     trainer = Trainer(
-        max_epochs=10,
+        max_epochs=50,
         # limit_val_batches=100,
         # limit_train_batches=1,
-        log_every_n_steps=100,
+        check_val_every_n_epoch=10,
         logger=logger,
+        callbacks=[lr_monitor],
     )
     trainer.fit(model=model, datamodule=datamodule)
     trainer.save_checkpoint("checkpoints/model.ckpt")
