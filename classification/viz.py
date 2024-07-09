@@ -1,11 +1,11 @@
 import sys
 import numpy as np
 from matplotlib import pyplot as plt
+import matplotlib as mpl
 import pydicom
 from pydicom.errors import InvalidDicomError
 import streamlit as st
 from typing import List, Optional
-from copy import deepcopy
 from pathlib import Path
 
 _folder_current = Path(__file__).parent
@@ -13,8 +13,6 @@ _folder = _folder_current.parent
 sys.path.append(str(_folder))
 from classification.data.misc import window_image, class_names
 from classification.pipeline import ClassificationPipeline
-class_names = deepcopy(class_names)
-class_names[-1] = "none"
 
 
 def load_dicom_files(uploaded_files: List[str]) -> List[pydicom.FileDataset]:
@@ -28,10 +26,40 @@ def load_dicom_files(uploaded_files: List[str]) -> List[pydicom.FileDataset]:
     slices.sort(key=lambda x: float(x.ImagePositionPatient[2]))
     return slices
 
+
+def convert_scores_to_colors(
+        scores: np.ndarray, 
+        colors : np.ndarray = np.array(mpl.colormaps["tab10"].colors),
+        ) -> np.ndarray:
+    image = np.zeros((scores.shape[1], scores.shape[0], 3), np.float32)
+    for i in range(scores.shape[1]):
+        image[i] = 1 - (1 - np.expand_dims(colors[i], 0)) * np.expand_dims(scores[:, i], 1)
+    return image
+
+def show_slice_scores(
+        scores: np.ndarray, 
+        class_names : Optional[List[str]] = class_names,
+        select_index : Optional[int] = None,
+        ):
+    fig, ax = plt.subplots()
+    image = convert_scores_to_colors(scores)
+    ax.imshow(image)
+    if select_index is not None:
+        rect = mpl.patches.Rectangle(
+            (select_index-0.5, -0.5), 1., scores.shape[1], 
+            linewidth=1, edgecolor="black", facecolor="none")
+        ax.add_patch(rect)
+    ax.set_yticks(np.arange(scores.shape[1]))
+    if class_names is not None:
+        ax.set_yticklabels(class_names)    
+    st.pyplot(fig)
+    return
+
+
 def show_slice(
         slice: pydicom.FileDataset, 
         scores : Optional[np.ndarray] = None,
-        class_names : Optional[List] = class_names,
+        class_names : Optional[List[str]] = class_names,
         window_center: float = 40., 
         window_width: float = 80., 
         rescale_slope : float = 1., 
@@ -45,15 +73,13 @@ def show_slice(
         intercept=rescale_intercept,
     )
     ax.imshow(windowed_data, cmap='gray')
-    titles = [
-        f"Z-position: {slice.ImagePositionPatient[2]}",
-    ]
-    if scores is not None:
-        titles.append(f"Scores:")
-        titles += [f"\t{c:15s} : {s:.3f}" for c, s in zip(class_names, scores)]
-    ax.set_title("\n".join(titles))
     plt.axis("off")
+    st.title(f"Z-position: {slice.ImagePositionPatient[2]:.1f}")
+    st.header(f"Scores:")
+    for c, s in zip(class_names, scores):
+        st.text(f"\t{c:16s} : {s:.3f}")
     st.pyplot(fig)
+    return
     
 
 def main():
@@ -77,7 +103,8 @@ def main():
     
     if "model" not in st.session_state:
         st.session_state["model"] = ClassificationPipeline(
-            model_name="2d_v11_seresnext50_lr1-4", 
+            model_name="2d_v15_rn50_ml_fix",
+            seq_model_name="seq_2",
             checkpoint_name="best",
             device="cpu",
         )
@@ -94,15 +121,20 @@ def main():
         slices = st.session_state.slices
         # slices = load_dicom_files(uploaded_files)
         if "scores" not in st.session_state:
-            st.session_state.scores = model.predict(slices)
+            scores = model.predict(slices)
+            scores[:, -1] = 1 - scores[:, -1]
+            st.session_state.scores = scores
         scores = st.session_state.scores
         # scores = model.predict(slices)
-        
+
         if len(slices) > 0:
             slice_idx = st.slider("Select Slice", min_value=0, max_value=len(slices) - 1, value=0, step=1)
+        
+            show_slice_scores(scores, select_index=slice_idx)
+        
             slice = slices[slice_idx]
             rescale_slope = slice.RescaleSlope if 'RescaleSlope' in slice else 1
-            rescale_intercept = slice.RescaleIntercept if 'RescaleIntercept' in slice else 0
+            rescale_intercept = slice.RescaleIntercept if 'RescaleIntercept' in slice else -1024.
 
             # Windowing parameters input
             window_width = st.slider("Window Width", min_value=1, max_value=400, value=80, step=1)

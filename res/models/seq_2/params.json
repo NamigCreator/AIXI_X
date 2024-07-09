@@ -1,0 +1,13 @@
+{
+    "model_params": {
+        "feature_dim": 1000
+    },
+    "n_epochs": 40,
+    "batch_size": 32,
+    "dataset": {
+        "z_size": 64
+    },
+    "lr": 0.001,
+    "weight_decay": 0.0,
+    "target_mode": "multilabel"
+}

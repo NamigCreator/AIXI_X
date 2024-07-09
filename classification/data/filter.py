@@ -20,10 +20,11 @@ class FilterBrainPresent(Filter):
         self.window_width = window_width
         self.threshold_occupancy = threshold_occupancy
 
-    def filter(self, image: np.ndarray) -> Optional[np.ndarray]:
+    def filter(self, image: np.ndarray, **kwargs) -> Optional[np.ndarray]:
         windowed = window_image(image, 
             window_center=self.window_center,
             window_width=self.window_width,
+            **kwargs,
         )
         occupancy = np.mean((windowed > 0) & (windowed < 1))
         if occupancy >= self.threshold_occupancy:
