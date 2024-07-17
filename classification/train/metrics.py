@@ -30,6 +30,8 @@ class CrossEntropyMetric(Metric):
         loss = self.loss_function(preds, targets.to(preds.dtype)).mean(0)
         if loss.ndim > 0 and self.class_weights is not None:
             loss = torch.sum(self.class_weights * loss)
+        elif loss.ndim > 0:
+            loss = torch.mean(loss)
         self.sum_loss += loss
         self.total_batches += 1
     

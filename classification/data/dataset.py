@@ -24,6 +24,8 @@ class DatasetBase(Dataset):
             patient_ids : Optional[np.ndarray] = None,
             image_size : Tuple[int, int] = (256, 256),
             transforms : Optional[torch.nn.Module] = None,
+            intercepts : Optional[Union[np.ndarray, float]] = -1024.,
+            slopes : Optional[Union[np.ndarray, float]] = 1.,
             ):
         self.folder = folder
         if self.folder is not None and \
@@ -47,6 +49,8 @@ class DatasetBase(Dataset):
 
         self.relevant_inds = None
         self.transforms = transforms
+        self.intercepts = intercepts
+        self.slopes = slopes
 
     def get_config(self) -> Dict[str, Any]:
         config = {
@@ -63,8 +67,8 @@ class DatasetBase(Dataset):
         else:
             return len(self.relevant_inds)
 
-    def convert_image(self, img: np.ndarray) -> np.ndarray:
-        return window_image(img)
+    def convert_image(self, img: np.ndarray, **kwargs) -> np.ndarray:
+        return window_image(img, **kwargs)
 
     @staticmethod
     def read_dcm(
@@ -77,6 +81,20 @@ class DatasetBase(Dataset):
         if image_size is not None:
             img = cv2.resize(img, dsize=image_size, interpolation=cv2.INTER_CUBIC)
         return img
+    
+    def _get_convert_kwargs(self, index : Optional[int] = None) -> Dict[str, Any]:
+        convert_kwargs = {}
+        if self.intercepts is not None:
+            if isinstance(self.intercepts, float) or index is None:
+                convert_kwargs["intercept"] = self.intercepts
+            else:
+                convert_kwargs["intercept"] = self.intercepts[index]
+        if self.slopes is not None:
+            if isinstance(self.slopes, float) or index is None:
+                convert_kwargs["slope"] = self.slopes
+            else:
+                convert_kwargs["slope"] = self.slopes[index]
+        return convert_kwargs
 
     def load_file(self, name: str) -> np.ndarray:
         filename_npy = self.folder.joinpath(f"ID_{name}.npy")
@@ -108,7 +126,10 @@ class DatasetBase(Dataset):
             img = self.images[idx]
         if img.shape[0] != self.image_size[0] or img.shape[1] != self.image_size[1]:
             img = change_image_size(img, image_size=self.image_size)
-        img = self.convert_image(img)
+        
+        convert_kwargs = self._get_convert_kwargs(idx)
+        img = self.convert_image(img, **convert_kwargs)
+        
         if not isinstance(img, torch.Tensor):
             img = torch.from_numpy(img)
         if self.labels is None:
@@ -139,6 +160,19 @@ class DatasetBase(Dataset):
             self.images.append(img)
         return
     
+    def _filter_single_image(self, 
+            index: int,
+            filter: Filter,
+            ) -> bool:
+        if self.images is None:
+            img = self.load_file(self.ids[index])
+        else:
+            img = self.images[index]
+        if img is None or np.all(img == 0):
+            return False
+        processed = filter.filter(img, **self._get_convert_kwargs(index))
+        return processed is not None
+    
     def apply_filters(self, filters: List[Filter]):
         n = len(self.ids) if self.ids is not None else len(self.images)
         is_relevant = np.ones(n, bool)
@@ -147,15 +181,7 @@ class DatasetBase(Dataset):
             inds = np.where(is_relevant)[0]
             for index in Progress(inds, desc="images", 
                     show=(get_logging_level() in ["DEBUG", "INFO"]), leave=False):
-                if self.images is None:
-                    img = self.load_file(self.ids[index])
-                else:
-                    img = self.images[index]
-                if img is None or np.all(img == 0):
-                    is_relevant[index] = False
-                processed = filter.filter(img)
-                if processed is None:
-                    is_relevant[index] = False
+                is_relevant[index] = is_relevant[index] and self._filter_single_image(index, filter)
         logger.info(f"Filtered out [{np.count_nonzero(~is_relevant)}] images")
         self.relevant_inds = np.where(is_relevant)[0]
         return
@@ -180,9 +206,12 @@ class DatasetSingleChannel(DatasetBase):
         })
         return config
 
-    def convert_image(self, img: np.ndarray) -> np.ndarray:
+    def convert_image(self, img: np.ndarray, **kwargs) -> np.ndarray:
         img = window_image(img, 
-            window_center=self.window_center, window_width=self.window_width)
+            window_center=self.window_center, 
+            window_width=self.window_width
+            **kwargs,
+        )
         if self.transforms is not None:
             img = torch.from_numpy(img)
             img = self.transforms(img)
@@ -239,22 +268,22 @@ class DatasetMultiChannel(DatasetBase):
     def soft_slope(self) -> float:
         return self.soft_window_width
 
-    def convert_image(self, img: np.ndarray) -> np.ndarray:
+    def convert_image(self, img: np.ndarray, **kwargs) -> np.ndarray:
         brain_img = window_image(img, 
             window_center=self.brain_window_center, 
             window_width=self.brain_window_width,
+            **kwargs,
         )
         subdural_img = window_image(img, 
             window_center=self.subdural_window_center,
             window_width=self.subdural_window_width,
+            **kwargs,
         )
         soft_img = window_image(img,
             window_center=self.soft_window_center,
             window_width=self.soft_window_width,
+            **kwargs,
         )
-        # brain_img = (brain_img - self.brain_intercept) / self.brain_slope
-        # subdural_img = (subdural_img - self.subdural_intercept) / self.subdural_slope
-        # soft_img = (soft_img - self.soft_intercept) / self.soft_slope
         bsb_img = np.array([brain_img, subdural_img, soft_img])
         if self.transforms is not None:
             bsb_img = torch.from_numpy(bsb_img)
@@ -275,7 +304,9 @@ class Dataset3D(DatasetMultiChannel):
         )
         self.z_positions = z_positions
         self.z_size = z_size
+        self._set_mappings()
 
+    def _set_mappings(self):
         self._mapping_patient_to_inds = {}
         for i, patient_id in enumerate(self.patient_ids):
             self._mapping_patient_to_inds.setdefault(patient_id, []).append(i)
@@ -334,7 +365,10 @@ class Dataset3D(DatasetMultiChannel):
                 img = self.images[index]
             if img.shape[0] != self.image_size[0] or img.shape[1] != self.image_size[1]:
                 img = change_image_size(img, image_size=self.image_size)
-            img = self.convert_image(img)
+                
+            convert_kwargs = self._get_convert_kwargs(idx)
+            img = self.convert_image(img, **convert_kwargs)
+            
             ids.append(sop_id)
             stacked[:, i_start+i] = img
             masks[i_start+i] = 1
@@ -355,8 +389,8 @@ class Dataset3D(DatasetMultiChannel):
             data["labels"] = labels_out
         return data
     
-    def apply_filters(self, filters: List[Filter]):
-        super().apply_filters(filters)
+    def apply_filters(self, filters: List[Filter], *args, **kwargs):
+        super().apply_filters(filters, *args, **kwargs)
         self._mapping_patient_to_inds = {k: v[
             np.isin(v, self.relevant_inds, assume_unique=True)] 
             for k, v in self._mapping_patient_to_inds.items()}
@@ -366,7 +400,18 @@ class Dataset3D(DatasetMultiChannel):
 def collate_fn_3d(
         data: List[Dict[str, Any]],
         ) -> Dict[str, Any]:
-    images = [d["img"] for d in data]
+    if "img" in data[0]:
+        images = [d["img"] for d in data]
+    else:
+        images = None
+    if "embeds" in data[0]:
+        embeds = [d["embeds"] for d in data]
+    else:
+        embeds = None
+    if "preds" in data[0]:
+        preds = [d["preds"] for d in data]
+    else:
+        preds = None
     labels = [d["labels"] for d in data] if "labels" in data[0] else None
     inds = [d["index"] for d in data]
     inds_masked = [d["index_masked"] for d in data]
@@ -374,11 +419,24 @@ def collate_fn_3d(
     patient_ids = [d["patient_id"] for d in data]
     ids = [d["id"] for d in data]
 
-    if isinstance(images, np.ndarray):
-        images = np.array(images)
-        images = torch.from_numpy(images)
-    else:
-        images = torch.stack(images)
+    if images is not None:
+        if isinstance(images[0], np.ndarray):
+            images = np.array(images)
+            images = torch.from_numpy(images)
+        else:
+            images = torch.stack(images)
+    if embeds is not None:
+        if isinstance(embeds[0], np.ndarray):
+            embeds = np.array(embeds)
+            embeds = torch.from_numpy(embeds)
+        else:
+            embeds = torch.stack(embeds)
+    if preds is not None:
+        if isinstance(preds[0], np.ndarray):
+            preds = np.array(preds)
+            preds = torch.from_numpy(preds)
+        else:
+            preds = torch.stack(preds)
 
     if labels is not None:
         labels_m = [l[i] for l, i in zip(labels, inds_masked)]
@@ -392,13 +450,18 @@ def collate_fn_3d(
     inds_masked = list(inds_masked)
 
     data_out = {
-        "img": images,
         "id": ids,
         "index": inds,
         "index_masked": inds_masked,
         "patient_index": patient_indexes,
         "patient_id": patient_ids,
     }
+    if images is not None:
+        data_out["img"] = images
+    if embeds is not None:
+        data_out["embeds"] = embeds
+    if preds is not None:
+        data_out["preds"] = preds
     if labels is not None:
         data_out.update({
             "labels_m": labels_m,
@@ -407,10 +470,112 @@ def collate_fn_3d(
     return data_out
 
 
+class DatasetEmbeds(Dataset):
+    def __init__(self,
+            preds: np.ndarray,
+            embeds: np.ndarray,
+            patient_ids: np.ndarray,
+            z_positions: np.ndarray,
+            labels : Optional[np.ndarray] = None,
+            ids : Optional[np.ndarray] = None,
+            z_size : int = 64,   
+            ):
+        super().__init__()
+        self.preds = preds
+        self.embeds = embeds
+        self.patient_ids = patient_ids
+        self.z_positions = z_positions
+        self.labels = labels
+        self.ids = ids
+        self.z_size = z_size
+        self._set_mappings()
+        
+    def _set_mappings(self):
+        self._mapping_patient_to_inds = {}
+        for i, patient_id in enumerate(self.patient_ids):
+            self._mapping_patient_to_inds.setdefault(patient_id, []).append(i)
+        self._mapping_patient_to_inds = {k: np.array(v, np.int32) 
+            for k, v in self._mapping_patient_to_inds.items()}
+        self._patient_ids_unique = np.array(list(self._mapping_patient_to_inds.keys()))
+
+        for p in list(self._mapping_patient_to_inds.keys()):
+            inds = self._mapping_patient_to_inds[p]
+            z = self.z_positions[inds]
+            inds_sort = np.argsort(z)
+            inds = inds[inds_sort]
+            self._mapping_patient_to_inds[p] = inds
+    
+    @property
+    def embed_dim(self) -> int:
+        return self.embeds.shape[1]
+    
+    def __len__(self) -> int:
+        return len(self._mapping_patient_to_inds)
+    
+    def get_config(self) -> Dict[str, Any]:
+        config = {
+            "z_size": self.z_size,
+        }
+        return config
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        patient_id = self._patient_ids_unique[idx]
+        inds = self._mapping_patient_to_inds[patient_id]
+        if self.labels is None:
+            ls = None
+        else:
+            ls = self.labels[inds]
+            
+        if len(inds) > self.z_size:
+            i_start = (len(inds) - self.z_size) // 2
+            if ls is not None:
+                ls = ls[i_start : i_start + self.z_size]
+            inds = inds[i_start : i_start + self.z_size]
+            
+        stacked = np.zeros((self.z_size, self.embed_dim), np.float32)
+        i_start = (self.z_size - len(inds)) // 2
+        masks = np.zeros(self.z_size, bool)
+        if ls is None:
+            labels_out = None
+        else:
+            labels_out = np.zeros((self.z_size, ls.shape[1]), bool)
+        indexes_masked = []
+        ids = []
+        stacked_preds = np.zeros((self.z_size, self.preds.shape[1]), np.float32)
+        for i, index in enumerate(inds):
+            if self.ids is None:
+                sop_id = index
+            else:
+                sop_id = self.ids[index]
+            pred = self.preds[index]
+            embed = self.embeds[index]
+            ids.append(sop_id)
+            stacked[i_start+i] = embed
+            stacked_preds[i_start+i] = pred
+            masks[i_start+i] = 1
+            if labels_out is not None:
+                labels_out[i_start+i] = ls[i]
+            indexes_masked.append(i_start+i)
+        indexes_masked = np.array(indexes_masked, np.int32)
+
+        data = {
+            "embeds": stacked,
+            "id": ids,
+            "index": inds,
+            "index_masked": indexes_masked,
+            "patient_index": idx,
+            "patient_id": patient_id,
+            "preds": stacked_preds,
+        }
+        if labels_out is not None:
+            data["labels"] = labels_out
+        return data
+            
+
 def init_dataset(
-        mode: Literal["2d_single_channel", "2d_multichannel", "3d"] = "2d_single_channel",
+        mode: Literal["2d_single_channel", "2d_multichannel", "3d", "embeds"] = "2d_single_channel",
         **kwargs,
-        ) -> Dataset:
+        ) -> Union[DatasetBase, DatasetEmbeds]:
     if mode == "2d_single_channel":
         dataset_class = DatasetSingleChannel
     elif mode == "2d_multichannel":
@@ -420,6 +585,8 @@ def init_dataset(
         )
     elif mode == "3d":
         dataset_class = Dataset3D
+    elif mode == "embeds":
+        dataset_class = DatasetEmbeds
     else:
         raise ValueError(f"Unknown mode of dataset initialization: {mode}")
     dataset = dataset_class(**kwargs)
@@ -428,8 +595,8 @@ def init_dataset(
 
 def get_dataset_for_training(
         data: Union[Path, dict],
-        folder_images: Path,
-        mode : Literal["2d_single_channel", "2d_multichannel", "3d"] = "2d_single_channel",
+        folder_images : Optional[Path] = None,
+        mode : Literal["2d_single_channel", "2d_multichannel", "3d", "embeds"] = "2d_single_channel",
         split_set : Literal["train", "val", "test"] = "val",
         **kwargs,
         ) -> Dataset:
@@ -437,23 +604,35 @@ def get_dataset_for_training(
     if not isinstance(data, dict):
         data = pkl.load(open(data, "rb"))
     
-    args = {
-        "ids": data[f"{split_set}_data"].sop_id.values,
-        "folder": folder_images,
-        "labels": data[f"{split_set}_labels"],
-        # "patient_ids": data[f"{split_set}_data"].patient_id.values,
-        "patient_ids": data[f"{split_set}_data"].study_id.values,
-    }
-    if mode == "3d":
-        args["z_positions"] = data[f"{split_set}_data"].position_z.values
-    
+    d = data[f"{split_set}_data"]
+    if mode in ["2d_single_channel", "2d_multichannel", "3d"]:
+        args = {
+            "ids": d.sop_id.values,
+            "folder": folder_images,
+            "labels": data[f"{split_set}_labels"],
+            # "patient_ids": data[f"{split_set}_data"].patient_id.values,
+            "patient_ids": d.study_id.values,
+            "intercepts": d.intercept.values,
+            "slopes": d.slope.values,
+        }
+        if mode == "3d":
+            args["z_positions"] = d.position_z.values
+    elif mode == "embeds":
+        args = {
+            "ids": d.sop_id.values,
+            "labels": data[f"{split_set}_labels"],
+            "patient_ids": d.study_id.values,
+            "z_positions": d.position_z.values,
+        }
+    else:
+        raise ValueError(f"Unknown mode for dataset initialization: {mode}")
     return init_dataset(mode=mode, **args, **kwargs)
 
 
 def get_dataloader(
         data: Union[Path, dict],
-        folder_images: Path,
-        dataset_mode : Literal["2d_single_channel", "2d_multichannel", "3d"] = "2d_single_channel",
+        folder_images : Optional[Path] = None,
+        dataset_mode : Literal["2d_single_channel", "2d_multichannel", "3d", "embeds"] = "2d_single_channel",
         mode : Literal["train", "val", "test", "inference"] = "val",
         batch_size : int = 4, 
         num_workers : int = 8,
@@ -462,11 +641,11 @@ def get_dataloader(
         ) -> DataLoader:
     dataset = get_dataset_for_training(data=data, 
         folder_images=folder_images, mode=dataset_mode, **kwargs)
-    if len(filters) > 0:
+    if len(filters) > 0 and isinstance(dataset, DatasetBase):
         filters = [get_filter_by_name(f) for f in filters]
         dataset.apply_filters(filters)
     add_args = {}
-    if dataset_mode == "3d":
+    if dataset_mode in ["3d", "embeds"]:
         add_args["collate_fn"] = collate_fn_3d
     if mode == "train":
         add_args.update({
