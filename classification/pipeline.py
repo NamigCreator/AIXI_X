@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Literal, List, Union, Dict
+from typing import Optional, Literal, List, Union, Dict, Tuple
 import json
 import torch
 import numpy as np
@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from .data.dataset import init_dataset, collate_fn_3d
 from .model.model import get_model
-from .model.pl import PLModel, PLModel3D, PLModelSeq
+from .model.pl import PLModel, PLModel3D, PLModelSeq, PLModelSegm
 from .utils import Progress, init_logger, get_logging_level, run_multiprocess
 from .data.misc import get_metadata_from_dcm
 from .data.filter import get_filter_by_name
@@ -29,6 +29,7 @@ class ClassificationPipeline:
     def __init__(self,
             model_name: str,
             seq_model_name : Optional[str] = None,
+            segm_model_name : Optional[str] = None,
             checkpoint_name : str = "best",
             batch_size : Optional[str] = None,
             device : str = "cuda",
@@ -44,7 +45,7 @@ class ClassificationPipeline:
         self.mode = self.model_params["mode"]
         logger.debug("Initializing model")
         self.model = get_model(
-            mode=self.mode, 
+            model_type=self.mode, 
             filename_checkpoint=filename_checkpoint,
             model_name=self.model_params.get("model_arch", "efficientnet"),
         )
@@ -67,17 +68,17 @@ class ClassificationPipeline:
         )
         self.plmodel.to(self.device)
         
-        self.seq_model_name = None
+        self.seq_model_name = seq_model_name
         if seq_model_name is None:
             self.seq_model = None
             self.plmodel_seq = None
         else:
             filename_params_seq = _folder_models.joinpath(seq_model_name, "params.json")
-            filename_checkpoint_seq = _folder_checkpoints.joinpath(seq_model_name, f"best.ckpt")
+            filename_checkpoint_seq = _folder_checkpoints.joinpath(seq_model_name, "best.ckpt")
             self.seq_model_params = json.load(open(filename_params_seq))
             logger.debug("Initializing Sequence model")
             self.seq_model = get_model(
-                mode="seq",
+                model_type="seq",
                 filename_checkpoint=filename_checkpoint_seq,
                 **self.seq_model_params["model_params"],
             )
@@ -89,6 +90,33 @@ class ClassificationPipeline:
                 target_mode=self.seq_model_params["target_mode"],
             )
             self.plmodel_seq.to(self.device)
+
+        self.segm_model_name = segm_model_name
+        if segm_model_name is None:
+            self.segm_model = None
+            self.plmodel_segm = None
+        else:
+            filename_params_segm = _folder_models.joinpath(segm_model_name, "params.json")
+            filename_checkpoint_segm = _folder_checkpoints.joinpath(segm_model_name, "best.ckpt")
+            self.segm_model_params = json.load(open(filename_params_segm))
+            logger.debug("Initializing Segmentation model")
+            segm_n_classes = self.segm_model_params["n_classes"]
+            segm_target_mode = self.segm_model_params["target_mode"]
+            segm_is_3d = self.segm_model_params["is_3d"]
+            self.segm_model = get_model(
+                model_type="segm", 
+                out_dim=(1 if segm_n_classes is None else segm_n_classes),
+                mode=("3d" if segm_is_3d else "2d"),
+                filename_checkpoint=filename_checkpoint_segm,
+            )
+            self.segm_model.eval()
+            self.segm_model.to(self.device)
+            self.plmodel_segm = PLModelSegm(
+                model=self.segm_model,
+                n_classes=segm_n_classes,
+                target_mode=segm_target_mode,
+            )
+            self.plmodel_segm.to(self.device)
 
         self.threads = threads
         self.filters = self.model_params.get("filters", [])
@@ -144,7 +172,7 @@ class ClassificationPipeline:
             preload : bool = False,
             get_full_data : bool = False,
             get_embeddings : bool = False,
-            ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+            ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray], Dict[str, np.ndarray]]:
         
         if ((z_positions is None and self.mode.startswith("3d")) \
                 or patient_ids is None) and folder is not None:
@@ -183,9 +211,10 @@ class ClassificationPipeline:
             "patient_ids": patient_ids,
             "intercepts": intercepts,
             "slopes": slopes,
+            "z_positions": z_positions,
         }
-        if self.mode.startswith("3d"):
-            dataset_args["z_positions"] = z_positions
+        # if self.mode.startswith("3d"):
+        #     dataset_args["z_positions"] = z_positions
         dataset = init_dataset(mode=self.mode, **dataset_args)
         if preload:
             dataset.preload_images()
@@ -211,6 +240,10 @@ class ClassificationPipeline:
                 embeds = []
             else:
                 embeds = None
+            if self.segm_model is not None:
+                segm_masks = []
+            else:
+                segm_masks = None
             for batch in Progress(dataloader, desc="Prediction",
                     show=(get_logging_level() in ["DEBUG", "INFO"])):
                 
@@ -218,6 +251,7 @@ class ClassificationPipeline:
                 sop_id = batch["id"]
                 p_index = batch["patient_index"]
                 p_id = batch["patient_id"]
+
                 if self.mode.startswith("2d"):
                     images = batch["img"]
                     if embeds is None:
@@ -236,6 +270,12 @@ class ClassificationPipeline:
                     p_id = np.concatenate([[p]*len(i) for i, p in zip(sop_index, p_id)])
                     sop_index = np.concatenate(sop_index)
                     sop_id = np.concatenate(sop_id)
+
+                if self.segm_model is not None:
+                    images = batch["img"]
+                    pred = self.plmodel_segm.forward(images.to(self.device))
+                    pred = self.plmodel_segm.activation(pred)
+                    segm_masks.append(pred.cpu())
 
                 sop_inds_all.append(sop_index)
                 sop_ids_all.append(sop_id)
@@ -263,10 +303,15 @@ class ClassificationPipeline:
             if embeds is not None:
                 embeds = torch.cat(embeds)
 
+            if segm_masks is not None:
+                segm_masks = torch.cat(segm_masks)
+
             preds_all = preds_all.numpy()
             preds_pat_all = preds_pat_all.numpy()
             if embeds is not None:
                 embeds = embeds.numpy()
+            if segm_masks is not None:
+                segm_masks = segm_masks.numpy()
 
         patient_ids_unique, ind = np.unique(patient_ids_all, return_index=True)
         patient_ids_unique = patient_ids_unique[np.argsort(ind)]
@@ -277,6 +322,12 @@ class ClassificationPipeline:
         if embeds is not None:
             embeds_final = np.zeros((n_images, embeds.shape[1]), np.float32)
             embeds_final[sop_inds_all] = embeds
+        if segm_masks is not None:
+            segm_masks_final = np.zeros((n_images,)+tuple(segm_masks.shape[1:]), np.float32)
+            segm_masks_final[sop_inds_all] = segm_masks
+            segm_masks = None
+        else:
+            segm_masks_final = None
         
         if ids is None:
             sop_ids_final = np.arange(len(images))
@@ -364,6 +415,13 @@ class ClassificationPipeline:
                     "preds_initial": preds_initial,
                     "patient_preds_initial": preds_pat_all_initial,
                 })
+            if self.segm_model is not None:
+                result.update({
+                    "segm_masks": segm_masks_final,
+                })
             return result
         else:
-            return preds_final
+            if segm_masks_final is None:
+                return preds_final
+            else:
+                return preds_final, segm_masks_final

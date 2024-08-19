@@ -1,14 +1,16 @@
 import numpy as np
 from pathlib import Path
-from typing import Literal, Optional, List, Tuple, Union
+from typing import Literal, Optional, List, Tuple, Union, Dict, Any
 import gc
 
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
+import torchvision
 
-from ..train.metrics import MultMetrics
+from ..train.metrics import MultMetrics, DiceLoss, MetricsSegmentation
+from ..data.misc import make_image_from_slice_channel, make_image_from_classes
 
 
 class ExtractStateDictCallback(pl.Callback):
@@ -38,7 +40,7 @@ class PLModel(pl.LightningModule):
             optimizer_weight_decay : float = 0.,
             scheduler_factor : float = 0.1,
             scheduler_patience : int = 10,
-            target_mode : Literal["multilabel", "multiclass"] = "multiclass",
+            target_mode : Literal["multilabel", "multiclass", "binary"] = "multiclass",
             monitor_metric : str = "val_ce",
             monitor_mode : Literal["max", "min"] = "min",
             folder_model : Optional[Path] = None,
@@ -74,6 +76,8 @@ class PLModel(pl.LightningModule):
             self.loss_function = torch.nn.BCEWithLogitsLoss(reduction="none")
         elif self.target_mode == "multiclass":
             self.loss_function = torch.nn.CrossEntropyLoss(weight=self.class_weights)
+        elif self.target_mode == "binary":
+            self.loss_function = torch.nn.BCEWithLogitsLoss()
         else:
             raise ValueError(f"Unknown target mode: {self.target_mode}")
         self.metrics = MultMetrics(
@@ -95,7 +99,7 @@ class PLModel(pl.LightningModule):
             return self.model(x)
 
     def activation(self, x: torch.Tensor) -> torch.Tensor:
-        if self.target_mode == "multilabel":
+        if self.target_mode in ["multilabel", "binary"]:
             x = torch.sigmoid(x)
         elif self.target_mode == "multiclass":
             x = torch.softmax(x, 1)
@@ -134,12 +138,14 @@ class PLModel(pl.LightningModule):
                 filename="best",
                 mode=self.monitor_mode,
                 verbose=0,
+                enable_version_counter=False,
             )
             checkpoint_last = ModelCheckpoint(
                 dirpath=self.folder_checkpoints,
                 filename="last",
                 verbose=0,
                 save_last=True,
+                enable_version_counter=False,
             )
             model = ExtractStateDictCallback(self.folder_checkpoints, self.folder_model, "best")
             results += [checkpoint, checkpoint_last, model]
@@ -147,7 +153,7 @@ class PLModel(pl.LightningModule):
             self.folder_model.mkdir(exist_ok=True)
         return results
 
-    def shared_step(self, batch: tuple) -> dict:
+    def shared_step(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         images = batch["img"]
         labels = batch.get("labels")
         patient_indexes = batch["patient_index"]
@@ -273,14 +279,19 @@ class PLModel(pl.LightningModule):
             outputs: dict, 
             mode : Literal["train", "val", "test"] = "val",
             ):
-        scores = self.get_val_scores(outputs)
+        scores = self.get_val_scores(outputs, mode=mode)
         for k, v in scores.items():
             self.log(f"{mode}_scores/{k}", v, on_step=False, on_epoch=True,
-                prog_bar=(k=="ce"), logger=True)
-        self.log_dict({f"{mode}_ce": scores["ce"]})
+                prog_bar=(k in ["ce", "dice"]), logger=True)
+        if "ce" in scores:
+            self.log_dict({f"{mode}_ce": scores["ce"]})
+        else:
+            self.log_dict({f"{mode}_dice": scores["dice"]})
 
     def on_train_epoch_start(self):
         self.train_step_outputs = []
+        self.log("lr", self.trainer.lr_scheduler_configs[0].scheduler.optimizer.param_groups[0]["lr"], 
+            on_step=False, on_epoch=True)
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -327,7 +338,7 @@ class PLModel3D(PLModel):
         return results, results_pat
 
 
-    def shared_step(self, batch: tuple) -> dict:
+    def shared_step(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         images = batch["img"]
         indexes = batch["index"]
         indexes_masked = batch["index_masked"]
@@ -366,7 +377,7 @@ class PLModel3D(PLModel):
         return d
 
 
-    def get_val_scores(self, outputs: dict) -> dict: 
+    def get_val_scores(self, outputs: dict, **kwargs) -> dict: 
         preds, labels = [], []
         preds_patients, labels_patients = [], []
         for out in outputs:
@@ -471,3 +482,183 @@ class PLModelSeq(PLModel3D):
                 "loss": loss,
             })
         return d
+    
+    
+class PLModelSegm(PLModel):
+    def __init__(self, 
+            *args, 
+            target_mode : Literal["multilabel", "multiclass", "binary"] = "multiclass",
+            monitor_metric : str = "val_dice",
+            monitor_mode : Literal["max", "min"] = "max",
+            class_weights : Optional[np.ndarray] = None,
+            loss_type : Literal["dice", "crossentropy"] = "dice",
+            n_classes : int = 6,
+            log_n_batches : int = 2,
+            **kwargs,
+            ):
+        if class_weights is None and target_mode != "binary":
+            class_weights = np.array([0.99676, 0.00018, 0.00144, 0.00041, 0.00047, 0.00074], np.float32)
+            class_weights = 1. / class_weights
+            class_weights /= class_weights.sum()
+        super(PLModelSegm, self).__init__(
+            *args, 
+            target_mode=target_mode,
+            monitor_metric=monitor_metric,
+            monitor_mode=monitor_mode,
+            class_weights=class_weights,
+            **kwargs,
+        )
+        # self.metrics = MultMetrics(
+        #     class_weights=self.class_weights,
+        #     device=self.device,
+        #     task=self.target_mode,
+        #     mode="segmentation",
+        # )
+        self.n_classes = n_classes
+        self.metrics = MetricsSegmentation(
+            class_weights=self.class_weights, 
+            n_classes=self.n_classes,
+        )
+        self.loss_type = loss_type
+        if self.loss_type == "dice":
+            self.loss_function = DiceLoss(
+                n_classes=self.n_classes, 
+                class_weights=self.class_weights,
+                activation=("softmax" if self.target_mode == "multiclass" else "sigmoid"),
+            )
+        elif self.loss_type == "crossentropy":
+            self.loss_function = torch.nn.CrossEntropyLoss(weight=self.class_weights)
+        else:
+            raise ValueError(f"Unknown loss function: {self.loss_type}")
+
+        self.log_n_batches = log_n_batches
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+    
+    def shared_step(self, batch: Dict[str, Any], get_images : bool = False) -> Dict[str, Any]:
+        images = batch["img"]
+        indexes = batch["slice_indexes"]
+        labels = batch.get("labels")
+        
+        pred = self.forward(images)
+        
+        if labels is not None:
+            loss = self.loss_function(pred, labels.to(torch.int64))
+            if loss.ndim > 4:
+                loss = loss.mean(dim=(0, 2, 3, 4))
+                self.class_weights = self.class_weights.to(loss.device)
+                loss = (self.class_weights * loss).sum() / self.class_weights.sum()
+            pred = self.activation(pred)
+            scores = self.metrics(pred, labels)
+        else:
+            loss = None
+            pred = self.activation(pred)
+            
+        d = {
+            "inds": indexes,
+        }
+        if labels is not None:
+            d.update({
+                "loss": loss,
+                "scores": scores,
+            })
+        if get_images:
+            d.update({
+                "images": images.detach().cpu(),
+                "pred": pred.detach().cpu(),
+            })
+            if labels is not None:
+                d["labels"] = labels.detach().cpu()
+        return d
+    
+    def training_step(self, train_batch, batch_idx):
+        d = self.shared_step(train_batch, get_images=(batch_idx < self.log_n_batches))
+        self.log("train_loss", d["loss"].item(), on_step=True, on_epoch=False)
+        self.train_step_outputs.append(d)
+        return d
+
+    def validation_step(self, val_batch, batch_idx):
+        d = self.shared_step(val_batch, get_images=(batch_idx < self.log_n_batches))
+        self.log("val_loss", d["loss"].item(), on_step=True, on_epoch=False)
+        self.val_step_outputs.append(d)
+        return d
+
+    def test_step(self, test_batch, batch_idx):
+        d = self.shared_step(test_batch, get_images=(batch_idx < self.log_n_batches))
+        self.log("test_loss", d["loss"].item(), on_step=True, on_epoch=False)
+        return d
+
+    def log_images(self, 
+            study: torch.Tensor, 
+            target: torch.Tensor, 
+            pred: torch.Tensor,
+            nrow : int = 6,
+            ignore_empty : bool = True,
+            mode : Literal["train", "val"] = "val",
+            ):
+        if isinstance(study, list):
+            study = torch.cat(study)
+        if isinstance(target, list):
+            target = torch.cat(target)
+        if isinstance(pred, list):
+            pred = torch.cat(pred)
+
+        if study.ndim == 5:
+            study = torch.permute(study, (0, 2, 1, 3, 4))
+            study = study.reshape(-1, study.shape[2], study.shape[3], study.shape[4])
+        if target.ndim == 4:
+            target = target.view(-1, target.shape[2], target.shape[3])
+        if pred.ndim == 5:
+            pred = torch.permute(pred, (0, 2, 1, 3, 4))
+            pred = pred.reshape(-1, pred.shape[2], pred.shape[3], pred.shape[4])
+
+        image_list = []
+        for i in range(study.shape[0]):
+            if ignore_empty and ((study[i, 0] > 0) & (study[i, 1] < 1)).float().mean() < 0.02:
+                continue
+            image_list.extend([
+                torch.from_numpy(make_image_from_slice_channel(study[i], 0)),
+                torch.from_numpy(make_image_from_classes(target[i], n_classes=self.n_classes)),
+                torch.from_numpy(make_image_from_classes(pred[i], n_classes=self.n_classes)),
+            ])
+        grid = torchvision.utils.make_grid(image_list, nrow=nrow, pad_value=1)
+        self.logger.experiment.add_image(f"{mode}/images", grid, self.current_epoch)
+        return
+    
+    def get_val_scores(self, 
+            outputs: Dict[str, Any], 
+            mode : Literal["train", "val", "test"] = "val",
+            ) -> Dict[str, Any]:
+        scores = {}
+        for out in outputs:
+            if "scores" in out:
+                for k, v in out["scores"].items():
+                    scores.setdefault(k, []).append(v)
+        scores = {k: np.mean(v) for k, v in scores.items()}
+        return scores
+
+    def on_train_epoch_end(self):
+        outputs = self.train_step_outputs
+        self.log_val_scores(outputs, mode="train")
+        self.log_images(
+            study=[out["images"] for out in outputs if "images" in out],
+            target=[out["labels"] for out in outputs if "labels" in out],
+            pred=[out["pred"] for out in outputs if "pred" in out],
+            mode="train",
+        )
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    def on_validation_epoch_end(self):
+        outputs = self.val_step_outputs
+        self.log_val_scores(outputs, mode="val")
+        self.log_images(
+            study=[out["images"] for out in outputs if "images" in out],
+            target=[out["labels"] for out in outputs if "labels" in out],
+            pred=[out["pred"] for out in outputs if "pred" in out],
+            mode="val",
+        )
+        torch.cuda.empty_cache()
+        gc.collect()

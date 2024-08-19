@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Literal, Optional
 import pretrainedmodels
+import math
 
 import torch
 import torch.nn as nn
@@ -85,21 +86,23 @@ class Model3D(torch.nn.Module):
 
 
 def get_model(
-        mode : Literal["2d_single_channel", "2d_multichannel", "3d", "seq"] = "2d_single_channel",
+        model_type : Literal["2d_single_channel", "2d_multichannel", "3d", "seq", "segm"] = "2d_single_channel",
         filename_checkpoint : Optional[Path] = None,
         in_dim : int = 3,
         **kwargs,
         ) -> nn.Module:
-    if mode in ["2d_single_channel", "2d_multichannel"]:
-        if mode == "2d_single_channel":
+    if model_type in ["2d_single_channel", "2d_multichannel"]:
+        if model_type == "2d_single_channel":
             in_dim = 1
         model = get_model_2d(in_dim=in_dim, **kwargs)
-    elif mode == "3d":
+    elif model_type == "3d":
         model = Model3D(in_dim=in_dim, **kwargs)
-    elif mode == "seq":
+    elif model_type == "seq":
         model = SequenceModel(**kwargs)
+    elif model_type == "segm":
+        model = UNet(**kwargs)
     else:
-        raise ValueError(f"Unknown mode for model initialization: {mode}")
+        raise ValueError(f"Unknown model_type for model initialization: {model_type}")
     
     if filename_checkpoint is not None:
         state_dict = torch.load(filename_checkpoint)["state_dict"]
@@ -200,3 +203,193 @@ class SequenceModel(nn.Module):
         x = self.final(x)
         out += x
         return out, out0
+    
+    
+class SliceNorm(nn.BatchNorm2d):
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        input_shape = x.shape
+        x = torch.permute(x, (0, 2, 1, 3, 4))
+        x = x.view(x.shape[0]*x.shape[1], x.shape[2], x.shape[3], x.shape[4])
+        x = super().forward(x, **kwargs)
+        x = x.view(input_shape[0], input_shape[2], input_shape[1], input_shape[3], input_shape[4])
+        x = torch.permute(x, (0, 2, 1, 3, 4))
+        return x
+    
+    
+class UNet(nn.Module):
+    def __init__(self,
+            in_dim : int = 3,
+            out_dim : int = 6,
+            min_channels : int = 16,
+            max_channels : int = 256,
+            n_down_blocks : int = 4,
+            mode : Literal["3d", "2d"] = "3d",
+            ):
+        super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.min_channels = min_channels
+        self.max_channels = max_channels
+        self.n_down_blocks = n_down_blocks
+        self.mode = mode
+
+        self.down_blocks = []
+        self.pool_layers = []
+        for i in range(n_down_blocks):
+            if i == 0:
+                channels_in = in_dim
+                channels_1 = min_channels
+            else:
+                channels_in = min_channels * 2**i
+                channels_1 = min_channels * 2**(i+1)
+            channels_out = min_channels * 2**(i+1)
+            if self.mode == "3d":
+                down_block = nn.Sequential(
+                    nn.Conv3d(channels_in, channels_1, (1, 3, 3), padding=(0, 1, 1), bias=False),
+                    # nn.BatchNorm3d(channels_1),
+                    SliceNorm(channels_1),
+                    nn.ReLU(inplace=True),
+                    nn.Conv3d(channels_1, channels_out, (1, 3, 3), padding=(0, 1, 1), bias=False),
+                    # nn.BatchNorm3d(channels_out),
+                    SliceNorm(channels_out),
+                    nn.ReLU(inplace=True),
+                )
+                pool_layer = nn.MaxPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2))
+            else:
+                down_block = nn.Sequential(
+                    nn.Conv2d(channels_in, channels_1, (3, 3), padding=(1, 1), bias=False),
+                    nn.BatchNorm2d(channels_1),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(channels_1, channels_out, (3, 3), padding=(1, 1), bias=False),
+                    nn.BatchNorm2d(channels_out),
+                    nn.ReLU(inplace=True),
+                )
+                pool_layer = nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))
+            self.down_blocks.append(down_block)
+            self.pool_layers.append(pool_layer)
+            
+        if self.mode == "3d":
+            self.bottleneck = nn.Sequential(
+                nn.Conv3d(max_channels, max_channels, 3, padding=1, bias=False),
+                # nn.BatchNorm3d(max_channels),
+                SliceNorm(max_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv3d(max_channels, max_channels, 3, padding=1, bias=False),
+                # nn.BatchNorm3d(max_channels),
+                SliceNorm(max_channels),
+                nn.ReLU(inplace=True),
+            )
+        else:
+            self.bottleneck = nn.Sequential(
+                nn.Conv2d(max_channels, max_channels, 3, padding=1, bias=False),
+                nn.BatchNorm2d(max_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(max_channels, max_channels, 3, padding=1, bias=False),
+                nn.BatchNorm2d(max_channels),
+                nn.ReLU(inplace=True),
+            )
+        
+        self.up_blocks = []
+        self.upsample_layers = []
+        for i in range(n_down_blocks):
+            channels_in = max_channels // 2**i
+            if i == n_down_blocks - 1:
+                channels_1 = min_channels * 2
+            else:
+                channels_1 = max_channels // 2**(i+1)
+            channels_out = max_channels // 2**(i+1)
+            if self.mode == "3d":
+                upsample_layer = nn.ConvTranspose3d(channels_in, channels_in, 3,
+                    stride=2, padding=1, output_padding=1)
+                up_block = nn.Sequential(
+                    nn.Dropout3d(p=0.5),
+                    nn.Conv3d(channels_in*2, channels_1, (1, 3, 3), padding=(0, 1, 1), bias=False),
+                    # nn.BatchNorm3d(channels_1),
+                    SliceNorm(channels_1),
+                    nn.ReLU(inplace=True),
+                    nn.Conv3d(channels_1, channels_out, (1, 3, 3), padding=(0, 1, 1), bias=False),
+                    # nn.BatchNorm3d(channels_out),
+                    SliceNorm(channels_out),
+                    nn.ReLU(inplace=True),
+                )
+            else:
+                upsample_layer = nn.ConvTranspose2d(channels_in, channels_in, 3,
+                    stride=2, padding=1, output_padding=1)
+                up_block = nn.Sequential(
+                    nn.Dropout2d(p=0.5),
+                    nn.Conv2d(channels_in*2, channels_1, (3, 3), padding=(1, 1), bias=False),
+                    nn.BatchNorm2d(channels_1),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(channels_1, channels_out, (3, 3), padding=(1, 1), bias=False),
+                    nn.BatchNorm2d(channels_out),
+                    nn.ReLU(inplace=True),
+                )
+            self.upsample_layers.append(upsample_layer)
+            self.up_blocks.append(up_block)
+            
+        if self.mode == "3d":
+            self.out = nn.Sequential(
+                nn.Conv3d(min_channels, out_dim, 1),
+                # nn.Softmax(dim=1),
+            )
+        else:
+            self.out = nn.Sequential(
+                nn.Conv2d(min_channels, out_dim, 1),
+            )
+        
+        self.down_blocks = nn.ModuleList(self.down_blocks)
+        self.pool_layers = nn.ModuleList(self.pool_layers)
+        self.up_blocks = nn.ModuleList(self.up_blocks)
+        self.upsample_layers = nn.ModuleList(self.upsample_layers)
+        
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if self.mode == "3d":
+            input_shape = (inputs.shape[2], inputs.shape[3], inputs.shape[4])
+            input_shape_corrected = (
+                int(math.ceil(input_shape[0]/2**len(self.down_blocks)))*2**len(self.down_blocks),
+                int(math.ceil(input_shape[1]/2**len(self.down_blocks)))*2**len(self.down_blocks),
+                int(math.ceil(input_shape[2]/2**len(self.down_blocks)))*2**len(self.down_blocks),
+            )
+            if input_shape[0] != input_shape_corrected[0] \
+                    or input_shape[1] != input_shape_corrected[1] \
+                    or input_shape[2] != input_shape_corrected[2]:
+                x = torch.nn.functional.interpolate(inputs, size=input_shape_corrected, mode="bilinear")
+                interpolated = True
+            else:
+                x = inputs
+                interpolated = False
+        else:
+            input_shape = (inputs.shape[2], inputs.shape[3])
+            input_shape_corrected = (
+                int(math.ceil(input_shape[0]/2**len(self.down_blocks)))*2**len(self.down_blocks),
+                int(math.ceil(input_shape[1]/2**len(self.down_blocks)))*2**len(self.down_blocks),
+            )
+            if input_shape[0] != input_shape_corrected[0] \
+                    or input_shape[1] != input_shape_corrected[1]:
+                x = torch.nn.functional.interpolate(inputs, size=input_shape_corrected, mode="bilinear")
+                interpolated = True
+            else:
+                x = inputs
+                interpolated = False
+            
+        downs = []
+        for i in range(len(self.down_blocks)):
+            x = self.down_blocks[i](x)
+            downs.append(x)
+            x = self.pool_layers[i](x)
+            
+        for i in range(len(self.up_blocks)):
+            x = self.upsample_layers[i](x)
+            x = torch.cat([downs[len(downs)-i-1], x], dim=1)
+            x = self.up_blocks[i](x)
+        
+        logits = self.out(x)
+        
+        if interpolated:
+            logits = torch.nn.functional.interpolate(logits, size=input_shape, mode="bilinear")
+            
+        if self.mode == "3d":
+            assert logits.shape == (inputs.shape[0], self.out_dim, inputs.shape[2], inputs.shape[3], inputs.shape[4]), "Wrong shape of the logits"
+        else:
+            assert logits.shape == (inputs.shape[0], self.out_dim, inputs.shape[2], inputs.shape[3]), "Wrong shape of the logits"
+        return logits

@@ -79,7 +79,7 @@ def main(
     filename_params = folder_model.joinpath("params.json")
     json.dump(params, open(filename_params, "w"), indent=4)
 
-    model = get_model(mode=mode, model_name=model_arch)
+    model = get_model(model_type=mode, model_name=model_arch)
 
     if mode.startswith("2d"):
         plmodel = PLModel
