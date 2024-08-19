@@ -29,7 +29,7 @@ def main(
     mode = params["mode"]
 
     model = get_model(
-        mode=mode, 
+        model_type=mode, 
         filename_checkpoint=filename_checkpoint,
         model_name=params.get("model_arch", "efficientnet"),
     )

@@ -1,0 +1,25 @@
+{
+    "n_epochs": 100,
+    "batch_size": 32,
+    "dataset": {
+        "image_size": [
+            256,
+            256
+        ],
+        "z_size": 64,
+        "brain_window_center": 40,
+        "brain_window_width": 80,
+        "subdural_window_center": 80,
+        "subdural_window_width": 200,
+        "soft_window_center": 40,
+        "soft_window_width": 380,
+        "n_classes": null,
+        "is_3d": false
+    },
+    "lr": 0.001,
+    "weight_decay": 0.0,
+    "loss_type": "dice",
+    "n_classes": null,
+    "target_mode": "binary",
+    "is_3d": false
+}
