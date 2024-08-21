@@ -1,6 +1,8 @@
+import multiprocessing
 from pathlib import Path
 import sys
 
+import pydicom
 from tqdm import tqdm
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -148,16 +150,32 @@ class CTBrainDataset(Dataset):
 
         return (image, edges, label, name)
 
+    
 
 class AIMIDataset:
     def __init__(
-        self, data_dir: Union[str, os.PathLike], patient_ids: Union[str, os.PathLike]
+        self,
+        data_dir: Union[str, os.PathLike],
+        patient_ids: Union[str, os.PathLike],
+        subset="train",
+        transform=None,
+        target_transform=None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.patient_ids = np.load(patient_ids, allow_pickle=True)
-        print(self.patient_ids)
         self.pathes = self._get_pathes_from_patient_ids(self.patient_ids)
         self._delete_empty_scans()
+
+        self.transform = None
+        if transform == "train":
+            self.transform = v2.Compose(
+                [
+                    v2.ToImage(),
+                    v2.RandomRotation(degrees=(-30, 30)),
+                    v2.RandomHorizontalFlip(p=0.5),
+                ]
+            )
+        self.target_transform = target_transform
 
     def _get_pathes_from_patient_ids(self, patient_ids: List[str]) -> List[str]:
         pathes = []
@@ -170,49 +188,61 @@ class AIMIDataset:
             dcm_folder = self.data_dir.joinpath(
                 f"batch_{batch_num}/{p_id}/reconstructed_image"
             )
-            patient_dcms = list(dcm_folder.rglob("*.dcm"))
-            print(dcm_folder)
-            print(patient_dcms)
+            patient_dcms = list(dcm_folder.rglob("image_*.dcm"))
             pathes.extend(patient_dcms)
         return pathes
 
     def _delete_empty_scans(self) -> None:
-        non_empty_pathes = []
-        f = get_filter_by_name(name="brain_present")
-        print("deleting empty scans...")
-        for p in tqdm(self.pathes):
-            img = get_image_from_dcm(p)
-            img = window_image(img, window_center=40, window_width=80)
-            is_ok = f(img)
-            if is_ok:
-                non_empty_pathes.append(p)
+
         print(f"Number of scans: {len(self.pathes)}")
-        self.pathes = non_empty_pathes
+        with multiprocessing.Pool(os.cpu_count()) as p:
+            emptiness_mask = p.map(check_dcm_for_emptiness, self.pathes)
+        self.pathes = [f for m, f in zip(emptiness_mask, self.pathes) if m]
         print(f"Number of non-empty scans remain: {len(self.pathes)}")
+
+    def __len__(self):
+        return len(self.pathes)
 
     def __getitem__(self, idx):
 
         dcm_path = self.pathes[idx]
+
+        name = str(dcm_path).split("/")
+        name = f"{name[-3]}_{name[-1]}"
+
         image = get_image_from_dcm(dcm_path)
         image = window_image(image, window_center=40, window_width=80)
 
         image = normalize_minmax(image)
-        image = image * 255  # seems that canny filter needs uint8
-        image = image.astype(np.uint8)
-        # image = cv.cvtColor(image, cv.COLOR_GRAY2RGB)
 
-        edges = {}
-        for threshold in [120]:
-            canny = apply_canny(image, maxVal=threshold)
-            canny = torch.Tensor(canny).unsqueeze(0)  # (1, H, W)
-            edges[threshold] = canny
+        if self.transform is not None:
+            image = self.transform(image)
+        else:
+            image = torch.from_numpy(image).unsqueeze(0)
 
-        image = torch.from_numpy(image).float()  # from uint to float
-        image = image.unsqueeze(0)
-        # image = torch.moveaxis(image, -1, 0)  # (H, W, 3) -> (3, H, W)
-        image = image / 255
+        edges = apply_canny(image, maxVal=120)
+        image = image.to(torch.float32)
+        edges = edges.to(torch.float32)
 
-        return (image, edges, None, None)
+        return (image, edges, 0, name)
+
+def preprocess_dicom(dcm_path):
+    
+    image = get_image_from_dcm(dcm_path)
+    image = window_image(image, window_center=40, window_width=80)
+    
+    image = normalize_minmax(image)
+    image_numpy = image
+
+    image = torch.from_numpy(image).unsqueeze(0).unsqueeze(0)
+
+    edges = apply_canny(image, maxVal=120).unsqueeze(0)
+    
+    image_tensor = image.to(torch.float32)
+    edges_tensor = edges.to(torch.float32)
+    concat_tensor = torch.concat([image_tensor, edges_tensor], dim=1)
+
+    return image_numpy, image_tensor, edges_tensor, concat_tensor 
 
 
 class AIMIBrainDataModule(LightningDataModule):
@@ -220,13 +250,20 @@ class AIMIBrainDataModule(LightningDataModule):
         self,
         data_dir: Union[str, os.PathLike],
         healthy_patient_ids: Union[str, os.PathLike],
-        damaged_patient_ids: Union[str, os.PathLike],
-        batch_size: int = 32,
+        img_dir: Union[str, os.PathLike],
+        info_table: Union[str, os.PathLike],
+        batch_size: int = 24,
     ):
         super().__init__()
+
+        # aimi dataset
         self.data_dir = data_dir
         self.healthy_patient_ids = healthy_patient_ids
-        self.damaged_patient_ids = damaged_patient_ids
+
+        # rsna dataset for validation
+        self.img_dir = img_dir
+        self.info_table = info_table
+
         self.batch_size = batch_size
 
     def setup(self, stage: str):
@@ -234,12 +271,12 @@ class AIMIBrainDataModule(LightningDataModule):
             self.train_set = AIMIDataset(
                 data_dir=self.data_dir, patient_ids=self.healthy_patient_ids
             )
-            self.val_set = AIMIDataset(
-                data_dir=self.data_dir, patient_ids=self.damaged_patient_ids
+            self.val_set = CTBrainDataset(
+                img_dir=self.img_dir, info_table=self.info_table, subset="val"
             )
         elif stage == "test":
-            self.test_set = AIMIDataset(
-                data_dir=self.data_dir, patient_ids=self.damaged_patient_ids
+            self.test_set = self.val_set = CTBrainDataset(
+                img_dir=self.img_dir, info_table=self.info_table, subset="val"
             )
 
     def train_dataloader(self):
@@ -320,15 +357,40 @@ def load_json(fname):
         return pickle.load(fin)
 
 
+def check_dcm_for_emptiness(fname) -> bool:
+    f = get_filter_by_name(name="brain_present")
+    img = get_image_from_dcm(fname)
+    # f takes unwindowed image
+    is_ok = f(img)
+    if is_ok is None:
+        return 0
+    else:
+        return 1
+
+
 if __name__ == "__main__":
 
+    # fname = "/home/mark/Data/tmp/br/ctsinogram/head_ct_dataset_anon/batch_9/series_9104/reconstructed_image/.azDownload-a8a49a28-daed-dc4f-7802-11a0308cf3ce-image_23.dcm"
+    # img = get_image_from_dcm(fname)
+    # dcm = pydicom.dcmread(str(fname), force=True)
+    # print(dcm)
+    # dataset = AIMIDataset(
+    # data_dir="/home/mark/Data/tmp/br/ctsinogram/head_ct_dataset_anon",
+    # patient_ids="/home/mark/Data/tmp/br/ctsinogram/head_ct_dataset_anon/healthy_patient_ids.npy",
+    # )
+
     proj_dir = Path(__file__).resolve().parent.parent
-    img_dir = proj_dir.joinpath("data/train_npy_subset_005")
     info_table = proj_dir.joinpath("data/split_subset_005.pkl")
-    datamodule = CTBrainDataset(img_dir=img_dir, info_table=info_table, transform=None)
-    for b in datamodule:
-        print(b[0].shape)
-        print(b[1].shape)
-        print(len(b))
-        print(b[0].sum())
-        break
+    img_dir = proj_dir.joinpath("data/train_npy_subset_005")
+
+    datamodule = AIMIBrainDataModule(
+        data_dir="/home/mark/Data/tmp/br/ctsinogram/head_ct_dataset_anon",
+        healthy_patient_ids="/home/mark/Data/tmp/br/ctsinogram/head_ct_dataset_anon/healthy_patient_ids.npy",
+        info_table=info_table,
+        img_dir=img_dir,
+    )
+
+    # datamodule.setup("fit")
+    # for b in datamodule.val_dataloader():
+    # print(b)
+    # break

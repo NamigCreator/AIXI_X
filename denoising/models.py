@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional
+import torch.nn.functional as F
 from torchvision.models import vgg19
 from torchvision.models._utils import IntermediateLayerGetter
+import math
 
 
 class BaseNetwork(nn.Module):
@@ -137,58 +138,6 @@ class ResnetBlock(nn.Module):
         return out
 
 
-class Generator_v0(nn.Module):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.downscaling = nn.Sequential(
-            # nn.ReflectionPad2d(3),
-            ConvBlock(in_channels=2, out_channels=64, kernel_size=7, stride=1),
-            ConvBlock(in_channels=64, out_channels=128, kernel_size=4, stride=2),
-            ConvBlock(in_channels=128, out_channels=256, kernel_size=4, stride=2),
-        )
-        self.residual_part = nn.Sequential(
-            *[
-                ResidualBlock(
-                    in_channels=256, out_channels=256, kernel_size=3, stride=1
-                )
-                for _ in range(8)
-            ]
-        )
-
-        self.upscaling = nn.Sequential(
-            TransposeConvBlock(
-                in_channels=256,
-                out_channels=128,
-                kernel_size=4,
-                stride=2,
-                padding=1,
-                output_padding=0,
-            ),
-            TransposeConvBlock(
-                in_channels=128,
-                out_channels=64,
-                kernel_size=3,
-                stride=2,
-                padding=1,
-                output_padding=1,
-            ),
-            # nn.ReflectionPad2d(3),
-            ConvBlock(
-                in_channels=64, out_channels=1, kernel_size=7, stride=1, last_layer=True
-            ),
-        )
-
-    def forward(self, x):
-        x = self.downscaling(x)
-        x = self.residual_part(x)
-        x = self.upscaling(x)
-        print("mine g: ", x.sum(), x.mean())
-        return x
-
-
-import math
-
-
 class ConvBlock(nn.Module):
     def __init__(
         self,
@@ -222,29 +171,6 @@ class ConvBlock(nn.Module):
             return (torch.tanh(x) + 1) / 2
 
         return torch.nn.functional.relu(x, inplace=True)
-
-
-class TransposeConvBlock(nn.Module):
-    def __init__(
-        self, in_channels, out_channels, kernel_size, stride, padding, output_padding
-    ) -> None:
-        super().__init__()
-        self.layer = nn.Sequential(
-            nn.ConvTranspose2d(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                output_padding=output_padding,
-            ),
-            nn.InstanceNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x):
-        x = self.layer(x)
-        return x
 
 
 class ResidualBlock(nn.Module):
@@ -300,6 +226,161 @@ class Descriminator(nn.Module):
     def forward(self, x):
         encoded = self.encoder(x)
         return self.head(encoded)
+
+
+from vit_pytorch.vit import Transformer
+from vit_pytorch import ViT
+from einops import repeat
+
+from einops.layers.torch import Rearrange
+
+
+def pair(t):
+    return t if isinstance(t, tuple) else (t, t)
+
+
+class TransformerLike(nn.Module):
+    def __init__(
+        self,
+        *,
+        image_size,
+        patch_size,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        channels=2,
+        dim_head=64,
+        dropout=0.0,
+        masking_ratio=0.5
+    ):
+        super().__init__()
+        assert (
+            masking_ratio > 0 and masking_ratio < 1
+        ), "masking ratio must be kept between 0 and 1"
+        self.masking_ratio = masking_ratio
+
+        image_height, image_width = pair(image_size)
+        patch_height, patch_width = pair(patch_size)
+
+        assert (
+            image_height % patch_height == 0 and image_width % patch_width == 0
+        ), "Image dimensions must be divisible by the patch size."
+
+        num_patches = (image_height // patch_height) * (image_width // patch_width)
+        patch_dim = channels * patch_height * patch_width
+        # extract some hyperparameters and functions from encoder (vision transformer to be trained)
+
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
+
+        self.to_patch = nn.Sequential(
+            Rearrange(
+                "b c (h p1) (w p2) -> b (h w) (p1 p2 c)",
+                p1=patch_height,
+                p2=patch_width,
+            )
+        )
+
+        self.from_patch = nn.Sequential(
+            Rearrange(
+                "b (h w) (p1 p2 c) -> b c (h p1) (w p2) ",
+                p1=patch_height,
+                p2=patch_width,
+                h=image_height // patch_height,
+                w=image_width // patch_width,
+            )
+        )
+
+        self.patch_to_emb = nn.Sequential(
+            nn.LayerNorm(patch_dim),
+            nn.Linear(patch_dim, dim),
+            nn.LayerNorm(dim),
+        )
+
+        # simple linear head
+        # self.mask_token = nn.Parameter(torch.randn(dim))
+        self.mask_token = nn.Parameter(torch.Tensor([1.0]), requires_grad=False)
+        self.to_pixels = nn.Sequential(
+            nn.Linear(dim, patch_height * patch_width),
+            nn.LayerNorm(patch_height * patch_width),
+        )
+
+    def train_forward(self, img):
+        device = img.device
+
+        # get patches
+
+        patches = self.to_patch(img)
+        batch, num_patches, *_ = patches.shape
+
+        # for indexing purposes
+
+        batch_range = torch.arange(batch, device=device)[:, None]
+
+        # get positions
+
+        pos_emb = self.pos_embedding[:, 1 : (num_patches + 1)]
+
+        # patch to encoder tokens and add positions
+
+        tokens = self.patch_to_emb(patches)
+        tokens = tokens + pos_emb
+
+        # prepare mask tokens
+
+        mask_tokens = repeat(self.mask_token, "d -> b n d", b=batch, n=num_patches)
+        mask_tokens = mask_tokens + pos_emb
+
+        # calculate of patches needed to be masked, and get positions (indices) to be masked
+
+        num_masked = int(self.masking_ratio * num_patches)
+        masked_indices = (
+            torch.rand(batch, num_patches, device=device)
+            .topk(k=num_masked, dim=-1)
+            .indices
+        )
+        masked_bool_mask = (
+            torch.zeros((batch, num_patches), device=device)
+            .scatter_(-1, masked_indices, 1)
+            .bool()
+        )
+
+        # mask tokens
+
+        tokens = torch.where(masked_bool_mask[..., None], mask_tokens, tokens)
+
+        # attend with vision transformer
+
+        encoded = self.transformer(tokens)
+
+        return self.to_pixels(encoded), patches, masked_indices
+
+    def test_forward(self, img):
+        device = img.device
+
+        # get patches
+
+        patches = self.to_patch(img)
+        batch, num_patches, *_ = patches.shape
+
+        # get positions
+
+        pos_emb = self.pos_embedding[:, 1 : (num_patches + 1)]
+
+        # patch to encoder tokens and add positions
+
+        tokens = self.patch_to_emb(patches)
+        tokens = tokens + pos_emb
+
+        # attend with vision transformer
+
+        encoded = self.transformer(tokens)
+
+        reconstructed_img = self.from_patch(self.to_pixels(encoded))
+
+        return reconstructed_img
 
 
 class VGG19_intermediate_layers_only(nn.Module):
