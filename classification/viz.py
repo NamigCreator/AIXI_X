@@ -13,8 +13,18 @@ _folder_current = Path(__file__).parent
 _folder = _folder_current.parent
 sys.path.append(str(_folder))
 from classification.data.misc import (
-    window_image, class_names, load_study, make_image_from_classes, change_image_size)
+    window_image,
+    class_names,
+    load_study,
+    make_image_from_classes,
+    change_image_size,
+)
 from classification.pipeline import ClassificationPipeline
+from denoising.train import Model as Denoiser
+
+import ssl
+
+ssl._create_default_https_context = ssl._create_unverified_context
 
 
 def load_dicom_files(uploaded_files: List[str]) -> List[pydicom.FileDataset]:
@@ -30,31 +40,39 @@ def load_dicom_files(uploaded_files: List[str]) -> List[pydicom.FileDataset]:
 
 
 def convert_scores_to_colors(
-        scores: np.ndarray, 
-        colors : np.ndarray = np.array(mpl.colormaps["tab10"].colors),
-        ) -> np.ndarray:
+    scores: np.ndarray,
+    colors: np.ndarray = np.array(mpl.colormaps["tab10"].colors),
+) -> np.ndarray:
     image = np.zeros((scores.shape[1], scores.shape[0], 3), np.float32)
     for i in range(scores.shape[1]):
-        image[i] = 1 - (1 - np.expand_dims(colors[i], 0)) * np.expand_dims(scores[:, i], 1)
+        image[i] = 1 - (1 - np.expand_dims(colors[i], 0)) * np.expand_dims(
+            scores[:, i], 1
+        )
     return image
 
+
 def show_slice_scores(
-        scores: np.ndarray, 
-        class_names : Optional[List[str]] = class_names,
-        select_index : Optional[int] = None,
-        col=None,
-        ):
+    scores: np.ndarray,
+    class_names: Optional[List[str]] = class_names,
+    select_index: Optional[int] = None,
+    col=None,
+):
     fig, ax = plt.subplots()
     image = convert_scores_to_colors(scores)
     ax.imshow(image)
     if select_index is not None:
         rect = mpl.patches.Rectangle(
-            (select_index-0.5, -0.5), 1., scores.shape[1], 
-            linewidth=1, edgecolor="black", facecolor="none")
+            (select_index - 0.5, -0.5),
+            1.0,
+            scores.shape[1],
+            linewidth=1,
+            edgecolor="black",
+            facecolor="none",
+        )
         ax.add_patch(rect)
     ax.set_yticks(np.arange(scores.shape[1]))
     if class_names is not None:
-        ax.set_yticklabels(class_names)    
+        ax.set_yticklabels(class_names)
     if col is None:
         st.pyplot(fig)
     else:
@@ -63,69 +81,101 @@ def show_slice_scores(
 
 
 def add_segmentation_mask_to_image(
-        image: np.ndarray, 
-        segm_mask: np.ndarray,
-        mask_alpha : float = 0.3,
-        colors : Optional[np.ndarray] = None,
-        threshold : Optional[float] = 0.1,
-        ) -> np.ndarray:
+    image: np.ndarray,
+    segm_mask: np.ndarray,
+    mask_alpha: float = 0.3,
+    colors: Optional[np.ndarray] = None,
+    threshold: Optional[float] = 0.1,
+) -> np.ndarray:
     if colors is None and segm_mask.ndim == 2:
-        colors = np.array([1., 0., 0.], np.float32)
+        colors = np.array([1.0, 0.0, 0.0], np.float32)
     elif colors is None and segm_mask.ndim == 3:
-        colors = np.array([[1., 0., 0.]], np.float32)
+        colors = np.array([[1.0, 0.0, 0.0]], np.float32)
     segm_mask_image = make_image_from_classes(segm_mask, colors=colors)
     if image.ndim == 2:
         image_size = (image.shape[0], image.shape[1])
     else:
         image_size = (image.shape[1], image.shape[2])
-    if image_size[1] != segm_mask_image.shape[1] or image_size[2] != segm_mask_image.shape[2]:
+    if image.ndim > 2 and (
+        image_size[1] != segm_mask_image.shape[1]
+        or image_size[2] != segm_mask_image.shape[2]
+    ):
         segm_mask_image = change_image_size(
-            np.moveaxis(segm_mask_image, 0, -1), image_size=image_size)
+            np.moveaxis(segm_mask_image, 0, -1), image_size=image_size
+        )
         segm_mask_image = np.moveaxis(segm_mask_image, -1, 0)
+
+    if image.ndim == 2 and (
+        image_size[0] != segm_mask_image.shape[1]
+        or image_size[1] != segm_mask_image.shape[2]
+    ):
+        segm_mask_image = change_image_size(
+            np.moveaxis(segm_mask_image, 0, -1), image_size=image_size
+        )
+        segm_mask_image = np.moveaxis(segm_mask_image, -1, 0)
+    
     if image.ndim == 2:
-        image = np.array([image]*3, np.float32)
+        image = np.array([image] * 3, np.float32)
     if threshold is None:
-        image_combined = image * (1.-mask_alpha) + segm_mask_image * mask_alpha
+        image_combined = image * (1.0 - mask_alpha) + segm_mask_image * mask_alpha
     else:
         image_combined = image.copy()
-        mask = change_image_size(segm_mask.max(axis=0), image_size=image_size) > threshold
+        mask = (
+            change_image_size(segm_mask.max(axis=0), image_size=image_size) > threshold
+        )
         for i in range(3):
-            image_combined[i][mask] = image_combined[i][mask] * (1. - mask_alpha) + segm_mask_image[i][mask] * mask_alpha
+            image_combined[i][mask] = (
+                image_combined[i][mask] * (1.0 - mask_alpha)
+                + segm_mask_image[i][mask] * mask_alpha
+            )
     image_combined = np.moveaxis(image_combined, 0, -1)
     image_combined = np.clip(image_combined, 0, 1)
     return image_combined
 
 
 def show_slice(
-        slice: pydicom.FileDataset, 
-        # scores : Optional[np.ndarray] = None,
-        segm_mask : Optional[np.ndarray] = None,
-        # class_names : Optional[List[str]] = class_names,
-        window_center: float = 40., 
-        window_width: float = 80., 
-        rescale_slope : float = 1., 
-        rescale_intercept : float = -1024.,
-        segm_mask_alpha : float = 0.3,
-        # segm_mask_alpha : float = 1.,
-        col=None,
-        ):
+    slice: pydicom.FileDataset,
+    # scores : Optional[np.ndarray] = None,
+    segm_mask: Optional[np.ndarray] = None,
+    denoised_img: Optional[np.ndarray] = None,
+    # class_names : Optional[List[str]] = class_names,
+    window_center: float = 40.0,
+    window_width: float = 80.0,
+    rescale_slope: float = 1.0,
+    rescale_intercept: float = -1024.0,
+    segm_mask_alpha: float = 0.3,
+    # segm_mask_alpha : float = 1.,
+    col=None,
+    show_denoised=False,
+):
     fig, ax = plt.subplots()
-    image = window_image(slice.pixel_array, 
-        window_center=window_center, 
-        window_width=window_width,
-        slope=rescale_slope, 
-        intercept=rescale_intercept,
-    )
+    if not show_denoised:
+        image = window_image(
+            slice.pixel_array,
+            window_center=window_center,
+            window_width=window_width,
+            slope=rescale_slope,
+            intercept=rescale_intercept,
+        )
+
+    else:
+        image = denoised_img
+        image = image.squeeze()
+
+    print("img: ", image.shape)
     if segm_mask is not None:
-        image = add_segmentation_mask_to_image(image, segm_mask, mask_alpha=segm_mask_alpha)
-    ax.imshow(image, cmap='gray', vmin=0, vmax=1)
+        image = add_segmentation_mask_to_image(
+            image, segm_mask, mask_alpha=segm_mask_alpha
+        )
+        print("img after mask: ", image.shape)
+    ax.imshow(image, cmap="gray", vmin=0, vmax=1)
     plt.axis("off")
     if col is None:
         col = st
     # col.title(f"Z-position: {slice.ImagePositionPatient[2]:.1f}")
     col.pyplot(fig)
     return
-    
+
 
 def main():
     # st.markdown("""
@@ -146,8 +196,8 @@ def main():
 
     st.set_page_config(layout="wide")
 
-    st.title('AISI X - AI Platform for Brain Diseases')
-    
+    st.title("AISI X - AI Platform for Brain Diseases")
+
     if "model" not in st.session_state:
         st.session_state["model"] = ClassificationPipeline(
             model_name="2d_v15_rn50_ml_fix",
@@ -158,6 +208,7 @@ def main():
             checkpoint_name="best",
             device="cpu",
         )
+
     model = st.session_state.model
 
     col1, col2 = st.columns(2)
@@ -167,16 +218,21 @@ def main():
     # uploaded_files = st.session_state.uploaded_files
     with st.form("File upload", clear_on_submit=True):
         uploaded_files = st.file_uploader(
-            "Choose DICOM files", 
-            type='dcm', 
+            "Choose DICOM files",
+            type="dcm",
             accept_multiple_files=True,
         )
         submitted = st.form_submit_button("submit")
-    
+
     if uploaded_files:
-        if "uploaded_files" not in st.session_state \
-                or len(uploaded_files) != len(st.session_state.uploaded_files) \
-                or not all((f1 == f2) for f1, f2 in zip(uploaded_files, st.session_state.uploaded_files)):
+        if (
+            "uploaded_files" not in st.session_state
+            or len(uploaded_files) != len(st.session_state.uploaded_files)
+            or not all(
+                (f1 == f2)
+                for f1, f2 in zip(uploaded_files, st.session_state.uploaded_files)
+            )
+        ):
             update_state = True
             st.session_state.uploaded_files = uploaded_files
         else:
@@ -192,7 +248,9 @@ def main():
                             f.write(file.getbuffer())
                             filenames.append(fname)
                     # st.session_state.slices = load_study(names=filenames, as_array=False, as_pydicom=True)
-                    st.session_state.slices = load_study(folder, as_array=False, as_pydicom=True)
+                    st.session_state.slices = load_study(
+                        folder, as_array=False, as_pydicom=True
+                    )
             else:
                 st.session_state.slices = load_dicom_files(uploaded_files)
         slices = st.session_state.slices
@@ -206,47 +264,72 @@ def main():
             if "segm_masks" in pred_data:
                 segm_masks = pred_data["segm_masks"]
                 st.session_state.segm_masks = segm_masks
+            if "denoised_images" in pred_data:
+                denoised_images = pred_data["denoised_images"]
+                st.session_state.denoised_images = denoised_images
+
         scores = st.session_state.scores
         segm_masks = st.session_state.get("segm_masks", None)
-    
-        # scores = model.predict(slices)
+        denoised_images = st.session_state.get("denoised_images", None)
 
         if len(slices) > 0:
-            slice_idx = col1.slider("Select Slice", min_value=0, max_value=len(slices) - 1, value=0, step=1)
+            slice_idx = col1.slider(
+                "Select Slice", min_value=0, max_value=len(slices) - 1, value=0, step=1
+            )
 
             if segm_masks is not None:
                 to_show_segm = col1.checkbox("Show segmentation mask", True)
-        
+            if denoised_images is not None:
+                to_show_denoised = col1.checkbox("Show denoised image", False)
+
             show_slice_scores(scores, select_index=slice_idx, col=col1)
-        
+
             slice = slices[slice_idx]
-            rescale_slope = slice.RescaleSlope if 'RescaleSlope' in slice else 1
-            rescale_intercept = slice.RescaleIntercept if 'RescaleIntercept' in slice else -1024.
+            rescale_slope = slice.RescaleSlope if "RescaleSlope" in slice else 1
+            rescale_intercept = (
+                slice.RescaleIntercept if "RescaleIntercept" in slice else -1024.0
+            )
             # rescale_intercept = 0
 
             # Windowing parameters input
-            window_width = col1.slider("Window Width", min_value=1, max_value=400, value=80, step=1)
-            window_center = col1.slider("Window Center", min_value=-100, max_value=300, value=40, step=1)
-            
+            window_width = col1.slider(
+                "Window Width", min_value=1, max_value=400, value=80, step=1
+            )
+            window_center = col1.slider(
+                "Window Center", min_value=-100, max_value=300, value=40, step=1
+            )
+
             col1.header(f"Scores:")
             for c, s in zip(class_names, scores[slice_idx]):
                 col1.text(f"\t{c:16s} : {s:.3f}")
 
             show_slice(
-                slice=slice, 
+                slice=slice,
+                # slice=denoised_images[slice_idx],
                 # scores=scores[slice_idx],
-                segm_mask=(segm_masks[slice_idx] if (segm_masks is not None and to_show_segm) else None),
+                segm_mask=(
+                    segm_masks[slice_idx]
+                    if (segm_masks is not None and to_show_segm)
+                    else None
+                ),
+                denoised_img=(
+                    denoised_images[slice_idx]
+                    if (denoised_images is not None and to_show_denoised)
+                    else None
+                ),
                 # scores=np.zeros(6),
-                window_center=window_center, 
-                window_width=window_width, 
-                rescale_slope=rescale_slope, 
+                window_center=window_center,
+                window_width=window_width,
+                rescale_slope=rescale_slope,
                 rescale_intercept=rescale_intercept,
                 col=col2,
+                show_denoised=to_show_denoised,
             )
         else:
             st.write("No valid DICOM files were uploaded.")
 
     return
+
 
 if __name__ == "__main__":
     main()
