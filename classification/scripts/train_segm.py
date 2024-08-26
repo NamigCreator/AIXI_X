@@ -10,7 +10,7 @@ import argparse
 _folder_current = Path(__file__).parent
 _folder = _folder_current.parent.parent
 sys.path.append(str(_folder))
-from classification.model.model import UNet
+from classification.model.model import UNet, AttentionUNet
 from classification.model.pl import PLModelSegm
 from classification.data.dataset import get_dataloader
 
@@ -20,6 +20,12 @@ _folder_logs = _folder.joinpath("res", "logs")
 _folder_models.mkdir(exist_ok=True)
 _folder_checkpoints.mkdir(exist_ok=True)
 _folder_logs.mkdir(exist_ok=True)
+
+
+_model_type_dict = {
+    "UNet": UNet,
+    "AttentionUNet": AttentionUNet,
+}
 
 
 def main(
@@ -36,6 +42,7 @@ def main(
         n_classes : Optional[int] = None,
         target_mode : Literal["multilabel", "multiclass", "binary"] = "binary",
         is_3d : bool = False,
+        model_type : Literal["UNet", "AttentionUNet"] = "AttentionUNet",
         ):
     
     random_seed = 0
@@ -52,6 +59,7 @@ def main(
         "n_classes": n_classes,
         "is_3d": is_3d,
         "preload": True,
+        "z_size": 32,
     }
     dataloader_train = get_dataloader(data,
         mode="train",
@@ -82,6 +90,7 @@ def main(
         "n_classes": n_classes,
         "target_mode": target_mode,
         "is_3d": is_3d,
+        "model_type": model_type,
     }
     filename_params = folder_model.joinpath("params.json")
     json.dump(params, open(filename_params, "w"), indent=4)
@@ -90,7 +99,7 @@ def main(
     if load_model and filename_checkpoint.exists():
         plmodel = plmodel.load_from_checkpoint(filename_checkpoint)
     else:
-        model = UNet(
+        model = _model_type_dict[model_type](
             out_dim=(1 if n_classes is None else n_classes),
             mode=("3d" if is_3d else "2d"),
         )

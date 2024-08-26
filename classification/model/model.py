@@ -393,3 +393,169 @@ class UNet(nn.Module):
         else:
             assert logits.shape == (inputs.shape[0], self.out_dim, inputs.shape[2], inputs.shape[3]), "Wrong shape of the logits"
         return logits
+
+
+# AttentionUnet from https://github.com/LeeJunHyun/Image_Segmentation/blob/master/network.py
+class AttentionBlock(nn.Module):
+    def __init__(self, 
+            g_dim: int, 
+            l_dim: int,
+            hid_dim: int,
+            mode : Literal["2d", "3d"] = "2d",
+            ):
+        super().__init__()
+        if mode == "3d":
+            conv = nn.Conv3d
+            bn = nn.BatchNorm3d
+        else:
+            conv = nn.Conv2d
+            bn = nn.BatchNorm2d
+        self.wg = nn.Sequential(
+            conv(g_dim, hid_dim, kernel_size=1, stride=1, padding=0, bias=False),
+            bn(hid_dim),
+        )
+        self.wx = nn.Sequential(
+            conv(l_dim, hid_dim, kernel_size=1, stride=1, padding=0, bias=False),
+            bn(hid_dim),
+        )
+        self.psi = nn.Sequential(
+            conv(hid_dim, 1, kernel_size=1, stride=1, padding=0, bias=False),
+            bn(1),
+            nn.Sigmoid(),
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        g1 = self.wg(g)
+        x1 = self.wx(x)
+        psi = self.relu(g1+x1)
+        psi = self.psi(psi)
+        return x*psi
+    
+
+class ConvBlock(nn.Module):
+    def __init__(self, 
+            in_dim: int, 
+            out_dim: int, 
+            hid_dim : Optional[int] = None,
+            mode : Literal["3d", "2d"] = "2d"):
+        super().__init__()
+        if mode == "3d":
+            conv = nn.Conv3d
+            bn = nn.BatchNorm3d
+        else:
+            conv = nn.Conv2d
+            bn = nn.BatchNorm2d
+        if hid_dim is None:
+            hid_dim = out_dim
+        self.conv = nn.Sequential(
+            conv(in_dim, hid_dim, kernel_size=3, stride=1, padding=1, bias=True),
+            bn(hid_dim),
+            nn.ReLU(inplace=True),
+            conv(hid_dim, out_dim, kernel_size=3, stride=1, padding=1, bias=True),
+            bn(out_dim),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+    
+
+class UpConvBlock(nn.Module):
+    def __init__(self,
+            in_dim: int,
+            out_dim: int,
+            mode : Literal["3d", "2d"] = "2d",
+            ):
+        super().__init__()
+        if mode == "3d":
+            conv = nn.Conv3d
+            bn = nn.BatchNorm3d
+        else:
+            conv = nn.Conv2d
+            bn = nn.BatchNorm2d
+        self.up = nn.Sequential(
+            nn.Upsample(scale_factor=2),
+            conv(in_dim, out_dim, kernel_size=3, stride=1, padding=1, bias=False),
+            bn(out_dim),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.up(x)
+        return x
+    
+
+class AttentionUNet(nn.Module):
+    def __init__(self,
+            in_dim : int = 3,
+            out_dim : int = 6,
+            min_channels : int = 16,
+            max_channels : int = 512,
+            n_down_blocks : int = 5,
+            mode : Literal["3d", "2d"] = "2d",
+            ):
+        super().__init__()
+
+        if mode == "3d":
+            self.pool = nn.MaxPool3d(kernel_size=2, stride=2)
+        else:
+            self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        down_blocks = []
+        self.down_blocks = []
+        for i in range(n_down_blocks):
+            if i == 0:
+                channels_in = in_dim
+                channels_1 = min_channels
+            else:
+                channels_in = min_channels * 2**i
+                channels_1 = min_channels * 2**(i+1)
+            channels_out = min_channels * 2**(i+1)
+            down_blocks.append(ConvBlock(channels_in, channels_out, mode=mode))
+        self.down_blocks = nn.ModuleList(down_blocks)
+
+        self.up_blocks = []
+        self.attn_blocks = []
+        self.upconv_blocks = []
+        for i in range(n_down_blocks-1):
+            channels_in = max_channels // 2**i
+            if i == n_down_blocks - 1:
+                channels_1 = min_channels * 2
+            else:
+                channels_1 = max_channels // 2**(i+1)
+            channels_out = max_channels // 2**(i+1)
+            up = UpConvBlock(channels_in, channels_out, mode=mode)
+            attn = AttentionBlock(channels_out, channels_out, channels_out//2, mode=mode)
+            up_conv = ConvBlock(channels_in, channels_out, mode=mode)
+            self.up_blocks.append(up)
+            self.attn_blocks.append(attn)
+            self.upconv_blocks.append(up_conv)
+        self.up_blocks = nn.ModuleList(self.up_blocks)
+        self.attn_blocks = nn.ModuleList(self.attn_blocks)
+        self.upconv_blocks = nn.ModuleList(self.upconv_blocks)
+
+        if mode == "3d":
+            conv = nn.Conv3d
+        else:
+            conv = nn.Conv2d
+        self.final = conv(channels_out, out_dim, kernel_size=1, stride=1, padding=0)
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        downs = []
+        for i, block in enumerate(self.down_blocks):
+            if i > 0:
+                x = self.pool(x)
+            x = block(x)
+            downs.append(x)
+
+        for i in range(len(downs)-1):
+            d = self.up_blocks[i](downs[-i-1])
+            x = downs[-i-2]
+            x = self.attn_blocks[i](d, x)
+            d = torch.cat((x, d), dim=1)
+            d = self.upconv_blocks[i](d)
+        
+        d = self.final(d)
+        return d
