@@ -85,9 +85,14 @@ preds = model.predict(folder=folder, ids=ids)
 
 ## Streamlit
 
+Download weights and some case studies from [here](https://drive.google.com/file/d/1gjmUNMJqe1raQak48ARMRSxGF4gMtxdg/view?usp=drive_link),
+extract and move checkpoints/ folder into res/ folder
+
 For running this example you should place "2d_v15_rn50_ml_fix.ckpt" checkpoint file into "./res/checkpoints/2d_v15_rn50_ml_fix/best.ckpt", and "seq_2.ckpt" into "./res/checkpoints/seq_2/best.ckpt".
 Alternatively, you can use models "2d_v18_rn101_ml" and "seq_4", but inference will be much slower.
 For segmentation model download "segm_8_split1_2d_n1.ckpt" and put into "./res/checkpoints/segm_8_split1_2d_n1/best.ckpt".
+
+
 
 ```bash
 python3 -m streamlit run ./classification/viz.py
