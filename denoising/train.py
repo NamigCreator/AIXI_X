@@ -19,13 +19,13 @@ import random
 import sys
 
 sys.path.append("code/")
-from models import (
+from denoising.models import (
     Generator,
     Descriminator,
     VGG19_intermediate_layers_only,
     TransformerLike,
 )
-from data_utils import CTBrainDataModule, AIMIBrainDataModule
+from denoising.data_utils import CTBrainDataModule, AIMIBrainDataModule, apply_canny
 
 
 class Model(LightningModule):

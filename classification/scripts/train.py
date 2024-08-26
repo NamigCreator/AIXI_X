@@ -34,6 +34,7 @@ def main(
         model_arch : str = "efficientnet",
         weight_decay : float = 0.,
         load_model : bool = True,
+        target_mode : Literal["multiclass", "multilabel"] = "multiclass",
         ):
 
     random_seed = 0
@@ -72,11 +73,13 @@ def main(
         "filters": filters,
         "model_arch": model_arch,
         "lr": lr,
+        "target_mode": target_mode,
+        "weight_decay": weight_decay,
     }
     filename_params = folder_model.joinpath("params.json")
     json.dump(params, open(filename_params, "w"), indent=4)
 
-    model = get_model(mode=mode, model_name=model_arch)
+    model = get_model(model_type=mode, model_name=model_arch)
 
     if mode.startswith("2d"):
         plmodel = PLModel
@@ -95,6 +98,7 @@ def main(
             folder_checkpoints=folder_checkpoints,
             optimizer_lr=lr,
             optimizer_weight_decay=weight_decay,
+            target_mode=target_mode,
         )
 
     logger = pl.loggers.TensorBoardLogger(folder_logs, name="", version="")

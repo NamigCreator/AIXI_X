@@ -6,8 +6,11 @@ import pydicom
 from tqdm import tqdm
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-from utils.dcm_utils import get_image_from_dcm, window_image
-from utils.filters import get_filter_by_name
+# from utils.dcm_utils import get_image_from_dcm, window_image
+from general_utils.dcm_utils import get_image_from_dcm, window_image
+
+# from utils.filters import get_filter_by_name
+from general_utils.filters import get_filter_by_name
 
 import os
 from typing import List, Union

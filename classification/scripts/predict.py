@@ -16,12 +16,14 @@ def predict(
         folder: Path,
         ids : Optional[Path] = None,
         filename_out : Optional[Path] = None,
+        get_embeddings : bool = False,
         **kwargs,
         ) -> Dict[str, np.ndarray]:
     
     model = ClassificationPipeline(model_name=model_name, **kwargs)
 
-    result = model.predict(folder=folder, ids=ids, get_full_data=True)
+    result = model.predict(folder=folder, ids=ids, 
+        get_full_data=True, get_embeddings=get_embeddings)
     if filename_out is not None:
         pickle.dump(result, open(filename_out, "wb"))
     return result
@@ -30,6 +32,8 @@ def predict(
 def _parse_args(args : Optional[List[str]] = None):
     parser = argparse.ArgumentParser(description="Runs model inference")
     parser.add_argument("model_name", type=str, help="Model name")
+    parser.add_argument("--seq_model_name", type=str, 
+        help="Sequential model name", default=None)
     parser.add_argument("folder", type=Path, 
         help="Path to folder containing input .dcm files")
     parser.add_argument("out", type=Path, default=None,
@@ -40,6 +44,8 @@ def _parse_args(args : Optional[List[str]] = None):
         help="Model checkpoint name")
     parser.add_argument("--batch_size", type=int, default=None,
         help="Batch size")
+    parser.add_argument("--get_embeddings", action="store_true",
+        help="If set, returns embeddings for each image except of predictions")
     return parser.parse_args(args=args)
 
 
@@ -47,9 +53,11 @@ if __name__ == "__main__":
     args = _parse_args()
     predict(
         model_name=args.model_name,
+        seq_model_name=args.seq_model_name,
         folder=args.folder,
         ids=args.ids,
         filename_out=args.out,
         checkpoint_name=args.checkpoint,
         batch_size=args.batch_size,
+        get_embeddings=args.get_embeddings,
     )
