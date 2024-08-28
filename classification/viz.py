@@ -5,9 +5,14 @@ import matplotlib as mpl
 import pydicom
 from pydicom.errors import InvalidDicomError
 import streamlit as st
-from typing import List, Optional
+from typing import List, Optional, Union, Tuple
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import pyvista as pv
+from stpyvista import stpyvista
+from pyvista.utilities import xvfb
+from skimage import transform, measure
+
 
 _folder_current = Path(__file__).parent
 _folder = _folder_current.parent
@@ -20,7 +25,6 @@ from classification.data.misc import (
     change_image_size,
 )
 from classification.pipeline import ClassificationPipeline
-from denoising.train import Model as Denoiser
 
 import ssl
 
@@ -135,16 +139,13 @@ def add_segmentation_mask_to_image(
 
 def show_slice(
     slice: pydicom.FileDataset,
-    # scores : Optional[np.ndarray] = None,
     segm_mask: Optional[np.ndarray] = None,
     denoised_img: Optional[np.ndarray] = None,
-    # class_names : Optional[List[str]] = class_names,
     window_center: float = 40.0,
     window_width: float = 80.0,
     rescale_slope: float = 1.0,
     rescale_intercept: float = -1024.0,
     segm_mask_alpha: float = 0.3,
-    # segm_mask_alpha : float = 1.,
     col=None,
     show_denoised=False,
 ):
@@ -172,9 +173,101 @@ def show_slice(
     plt.axis("off")
     if col is None:
         col = st
-    # col.title(f"Z-position: {slice.ImagePositionPatient[2]:.1f}")
     col.pyplot(fig)
     return
+
+
+def show_3d(
+        slices: List[Union[np.ndarray, pydicom.FileDataset]], 
+        masks: List[np.ndarray],
+        rescale : Optional[Tuple[float, float, float]] = (5, 0.25, 0.25),
+        as_mesh : bool = True,
+        mesh_head_level : float = 0.5,
+        mesh_mask_level : float = 0.5,
+        window_center : Optional[float] = None,
+        window_width : Optional[float] = None,
+        rescale_slope : float = 1.,
+        rescale_intercept : float = -1024.,
+        head_opacity : float = 0.2,
+        mask_opacity : float = 0.5,
+        show : bool = False,
+        ):
+    xvfb.start_xvfb()
+
+    if window_center is None:
+        if as_mesh:
+            window_center = 400
+        else:
+            window_center = 40
+    if window_width is None:
+        if as_mesh:
+            window_width = 1800
+        else:
+            window_width = 80
+
+    image = np.array([s.pixel_array if isinstance(s, pydicom.FileDataset) else s for s in slices], np.float32)
+    image = window_image(image, window_center=window_center, window_width=window_width,
+        intercept=rescale_intercept, slope=rescale_slope)
+
+    try:
+        pixel_spacing = slices[0].PixelSpacing
+    except:
+        pixel_spacing = slices[0].NominalScannedPixelSpacing
+    z_spacing = abs(slices[1].ImagePositionPatient[2] - slices[0].ImagePositionPatient[2])
+    resolution = (z_spacing, pixel_spacing[0], pixel_spacing[1])
+
+    if rescale is None:
+        masks = np.array([change_image_size(m[0], image.shape[-2:]) for m in masks])
+    else:
+        image = transform.rescale(image, rescale)
+        masks = transform.resize(masks[:, 0], image.shape)
+        resolution = [r / n for r, n in zip(resolution, rescale)]
+
+    pl = pv.Plotter()
+    if as_mesh:
+        verts, faces, _, _ = measure.marching_cubes(image, level=mesh_head_level, spacing=resolution)
+        verts_mask, faces_mask, _, _ = measure.marching_cubes(masks, level=mesh_mask_level, spacing=resolution)
+        mesh = pv.PolyData.from_regular_faces(verts, faces)
+        mesh_mask = pv.PolyData.from_regular_faces(verts_mask, faces_mask)
+        pl.add_mesh(mesh, opacity=head_opacity)
+        pl.add_mesh(mesh_mask, opacity=mask_opacity, color="red")
+    else:
+        pl.add_volume(image, resolution=resolution, opacity="linear", cmap="bone", show_scalar_bar=False)
+        pl.add_volume(masks, resolution=resolution, opacity="linear", cmap=["red"])
+    pl.camera_position = "zx"
+    if show:
+        stpyvista(pl, key="pv")
+    return pl
+
+@st.experimental_fragment
+def show_plotter(plotter: pv.Plotter):
+    stpyvista(plotter, key="pv")
+    return
+
+
+def calculate_mask_volume(
+        slices: List[pydicom.FileDataset], 
+        masks: List[np.ndarray], 
+        threshold : float = 0.5,
+        ) -> float:
+    volumes = []
+    positions = []
+    for index, (slice, mask) in enumerate(zip(slices, masks)):
+        slice_size = slice.pixel_array.shape
+        mask_size = mask.shape[1:]
+        multiplier = slice_size[0] / mask_size[0] * slice_size[1] / mask_size[1]
+        count = np.count_nonzero(mask >= threshold)
+        try:
+            spacing = slice.PixelSpacing
+        except:
+            spacing = slice.NominalScannedPixelSpacing
+        vol = count * spacing[0] * spacing[1] * multiplier
+        volumes.append(vol)
+        positions.append(slice.ImagePositionPatient[2])
+    volumes = np.array(volumes)
+    positions = np.diff(positions)
+    vol = np.sum(volumes[1:] * positions)
+    return vol / 1000
 
 
 def main():
@@ -211,18 +304,19 @@ def main():
 
     model = st.session_state.model
 
-    col1, col2 = st.columns(2)
+    if st.session_state.model.segm_model is None:
+        col1, col2 = st.columns(2)
+    else:
+        col1, col2, col3 = st.columns(3)
 
-    # if "uploaded_files" not in st.session_state:
-    #     st.session_state.uploaded_files = st.file_uploader("Choose DICOM files", type='dcm', accept_multiple_files=True)
-    # uploaded_files = st.session_state.uploaded_files
-    with st.form("File upload", clear_on_submit=True):
-        uploaded_files = st.file_uploader(
-            "Choose DICOM files",
-            type="dcm",
-            accept_multiple_files=True,
-        )
-        submitted = st.form_submit_button("submit")
+    with col1:
+        with st.form("File upload", clear_on_submit=True):
+            uploaded_files = st.file_uploader(
+                "Choose DICOM files",
+                type="dcm",
+                accept_multiple_files=True,
+            )
+            submitted = st.form_submit_button("submit")
 
     if uploaded_files:
         if (
@@ -264,9 +358,26 @@ def main():
             if "segm_masks" in pred_data:
                 segm_masks = pred_data["segm_masks"]
                 st.session_state.segm_masks = segm_masks
+                st.session_state.volume = calculate_mask_volume(slices, segm_masks)
+            else:
+                segm_masks = None
             if "denoised_images" in pred_data:
                 denoised_images = pred_data["denoised_images"]
                 st.session_state.denoised_images = denoised_images
+
+            slice = slices[0]
+            rescale_slope = slice.RescaleSlope if "RescaleSlope" in slice else 1
+            rescale_intercept = (
+                slice.RescaleIntercept if "RescaleIntercept" in slice else -1024.0
+            )
+            
+            if segm_masks is not None and "plotter" not in st.session_state:
+                plotter = show_3d(slices, segm_masks, as_mesh=True,
+                    rescale_slope=rescale_slope, 
+                    rescale_intercept=rescale_intercept,
+                    show=False,
+                )
+                st.session_state.plotter = plotter
 
         scores = st.session_state.scores
         segm_masks = st.session_state.get("segm_masks", None)
@@ -289,7 +400,6 @@ def main():
             rescale_intercept = (
                 slice.RescaleIntercept if "RescaleIntercept" in slice else -1024.0
             )
-            # rescale_intercept = 0
 
             # Windowing parameters input
             window_width = col1.slider(
@@ -299,14 +409,11 @@ def main():
                 "Window Center", min_value=-100, max_value=300, value=40, step=1
             )
 
-            col1.header(f"Scores:")
-            for c, s in zip(class_names, scores[slice_idx]):
-                col1.text(f"\t{c:16s} : {s:.3f}")
+            if "volume" in st.session_state:
+                col1.header(f"Hemorrhage volume: {st.session_state.volume:.1f}mL")
 
             show_slice(
                 slice=slice,
-                # slice=denoised_images[slice_idx],
-                # scores=scores[slice_idx],
                 segm_mask=(
                     segm_masks[slice_idx]
                     if (segm_masks is not None and to_show_segm)
@@ -325,6 +432,14 @@ def main():
                 col=col2,
                 show_denoised=to_show_denoised,
             )
+
+            col2.header(f"Scores:")
+            for c, s in zip(class_names, scores[slice_idx]):
+                col2.text(f"\t{c:16s} : {s:.3f}")
+
+            if "plotter" in st.session_state:
+                with col3:
+                    show_plotter(st.session_state.plotter)
         else:
             st.write("No valid DICOM files were uploaded.")
 

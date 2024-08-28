@@ -777,13 +777,13 @@ class DatasetBHSD(DatasetMultiChannel):
             if self.n_classes is None and label is not None:
                 label = label > 0
         
-            if image.shape[0] > self.z_size:
+            if image.shape[1] > self.z_size:
                 i_start = (image.shape[1] - self.z_size) // 2
                 image = image[:, i_start : i_start + self.z_size]
                 if label is not None:
                     label = label[i_start : i_start + self.z_size]
                 slice_indexes = np.arange(i_start, i_start + self.z_size)
-            elif image.shape[0] < self.z_size:
+            elif image.shape[1] < self.z_size:
                 i_start = (self.z_size - image.shape[1]) // 2
                 slice_indexes = np.full(self.z_size, -1, np.int32)
                 slice_indexes[i_start:i_start+image.shape[1]] = np.arange(image.shape[1])
@@ -852,9 +852,10 @@ def init_dataset(
         dataset_class = DatasetEmbeds
     elif mode == "segm":
         dataset_class = DatasetBHSD
-        kwargs["transforms"] = transforms.Normalize(
-            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225],
-        )
+        if not kwargs.get("is_3d"):
+            kwargs["transforms"] = transforms.Normalize(
+                mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225],
+            )
     else:
         raise ValueError(f"Unknown mode of dataset initialization: {mode}")
     dataset = dataset_class(**kwargs)
