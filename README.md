@@ -3,11 +3,25 @@
 
 ## Installation
 
-<!-- ```bash
+```bash
+sudo apt-get install libgl1-mesa-glx xvfb
 conda create -n rsna python=3.9
-conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
-conda install -c conda-forge pydicom
-``` -->
+conda activate rsna
+conda install -y -c conda-forge numpy
+conda install -y -c conda-forge matplotlib pandas scikit-image tqdm
+conda install -y pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+conda install -y -c conda-forge pydicom
+conda install -y -c conda-forge pyvista
+conda install -y -c https://conda.anaconda.org/simpleitk SimpleITK
+conda install -y -c conda-forge pretrainedmodels
+conda install -y -c conda-forge lightning
+conda install -y -c conda-forge fire
+conda install -y -c conda-forge neptune
+conda install -y -c conda-forge vit-pytorch
+python3 -m pip install opencv-python
+python3 -m pip install streamlit
+python3 -m pip install stpyvista
+```
 
 ## Data preprocessing for training
 
@@ -85,13 +99,8 @@ preds = model.predict(folder=folder, ids=ids)
 
 ## Streamlit
 
-Download weights and some case studies from [here](https://drive.google.com/file/d/1gjmUNMJqe1raQak48ARMRSxGF4gMtxdg/view?usp=drive_link),
+Download weights and some case studies from [here](https://drive.google.com/file/d/1SiKU7ZlkMnycoyR1-viPndshfs0LeAKC/view?usp=drive_link),
 extract and move checkpoints/ folder into res/ folder
-
-For running this example you should place "2d_v15_rn50_ml_fix.ckpt" checkpoint file into "./res/checkpoints/2d_v15_rn50_ml_fix/best.ckpt", and "seq_2.ckpt" into "./res/checkpoints/seq_2/best.ckpt".
-Alternatively, you can use models "2d_v18_rn101_ml" and "seq_4", but inference will be much slower.
-For segmentation model download "segm_8_split1_2d_n1.ckpt" and put into "./res/checkpoints/segm_8_split1_2d_n1/best.ckpt".
-
 
 
 ```bash

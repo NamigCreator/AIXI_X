@@ -10,7 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import pyvista as pv
 from stpyvista import stpyvista
-from pyvista.utilities import xvfb
+from pyvista.plotting.utilities import xvfb
 from skimage import transform, measure
 
 
@@ -163,12 +163,12 @@ def show_slice(
         image = denoised_img
         image = image.squeeze()
 
-    print("img: ", image.shape)
+    # print("img: ", image.shape)
     if segm_mask is not None:
         image = add_segmentation_mask_to_image(
             image, segm_mask, mask_alpha=segm_mask_alpha
         )
-        print("img after mask: ", image.shape)
+        # print("img after mask: ", image.shape)
     ax.imshow(image, cmap="gray", vmin=0, vmax=1)
     plt.axis("off")
     if col is None:
@@ -239,7 +239,7 @@ def show_3d(
         stpyvista(pl, key="pv")
     return pl
 
-@st.experimental_fragment
+# @st.fragment
 def show_plotter(plotter: pv.Plotter):
     stpyvista(plotter, key="pv")
     return
@@ -268,6 +268,73 @@ def calculate_mask_volume(
     positions = np.diff(positions)
     vol = np.sum(volumes[1:] * positions)
     return vol / 1000
+
+
+@st.fragment
+def plot_with_slider(
+        slices: List[pydicom.FileDataset],
+        scores: np.ndarray,
+        segm_masks : Optional[np.ndarray] = None,
+        denoised_images : Optional[np.ndarray] = None,
+        ):
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        slice_idx = st.slider(
+            "Select Slice", min_value=0, max_value=len(slices) - 1, value=0, step=1
+        )
+
+        if segm_masks is not None:
+            to_show_segm = st.checkbox("Show segmentation mask", True)
+        if denoised_images is not None:
+            to_show_denoised = st.checkbox("Show denoised image", False)
+
+        show_slice_scores(scores, select_index=slice_idx)
+
+        slice = slices[slice_idx]
+        rescale_slope = slice.RescaleSlope if "RescaleSlope" in slice else 1
+        rescale_intercept = (
+            slice.RescaleIntercept if "RescaleIntercept" in slice else -1024.0
+        )
+
+        # Windowing parameters input
+        window_width = st.slider(
+            "Window Width", min_value=1, max_value=400, value=80, step=1
+        )
+        window_center = st.slider(
+            "Window Center", min_value=-100, max_value=300, value=40, step=1
+        )
+
+        if "volume" in st.session_state:
+            st.header(f"Hemorrhage volume: {st.session_state.volume:.1f}mL")
+
+    with col2:
+        show_slice(
+            slice=slice,
+            segm_mask=(
+                segm_masks[slice_idx]
+                if (segm_masks is not None and to_show_segm)
+                else None
+            ),
+            denoised_img=(
+                denoised_images[slice_idx]
+                if (denoised_images is not None and to_show_denoised)
+                else None
+            ),
+            # scores=np.zeros(6),
+            window_center=window_center,
+            window_width=window_width,
+            rescale_slope=rescale_slope,
+            rescale_intercept=rescale_intercept,
+            # col=col2,
+            show_denoised=to_show_denoised,
+        )
+
+        st.header(f"Scores:")
+        for c, s in zip(class_names, scores[slice_idx]):
+            st.text(f"\t{c:16s} : {s:.3f}")
+    return
+
 
 
 def main():
@@ -305,9 +372,9 @@ def main():
     model = st.session_state.model
 
     if st.session_state.model.segm_model is None:
-        col1, col2 = st.columns(2)
+        col1 = st.columns(1)
     else:
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(spec=[2, 1])
 
     with col1:
         with st.form("File upload", clear_on_submit=True):
@@ -384,61 +451,17 @@ def main():
         denoised_images = st.session_state.get("denoised_images", None)
 
         if len(slices) > 0:
-            slice_idx = col1.slider(
-                "Select Slice", min_value=0, max_value=len(slices) - 1, value=0, step=1
-            )
 
-            if segm_masks is not None:
-                to_show_segm = col1.checkbox("Show segmentation mask", True)
-            if denoised_images is not None:
-                to_show_denoised = col1.checkbox("Show denoised image", False)
-
-            show_slice_scores(scores, select_index=slice_idx, col=col1)
-
-            slice = slices[slice_idx]
-            rescale_slope = slice.RescaleSlope if "RescaleSlope" in slice else 1
-            rescale_intercept = (
-                slice.RescaleIntercept if "RescaleIntercept" in slice else -1024.0
-            )
-
-            # Windowing parameters input
-            window_width = col1.slider(
-                "Window Width", min_value=1, max_value=400, value=80, step=1
-            )
-            window_center = col1.slider(
-                "Window Center", min_value=-100, max_value=300, value=40, step=1
-            )
-
-            if "volume" in st.session_state:
-                col1.header(f"Hemorrhage volume: {st.session_state.volume:.1f}mL")
-
-            show_slice(
-                slice=slice,
-                segm_mask=(
-                    segm_masks[slice_idx]
-                    if (segm_masks is not None and to_show_segm)
-                    else None
-                ),
-                denoised_img=(
-                    denoised_images[slice_idx]
-                    if (denoised_images is not None and to_show_denoised)
-                    else None
-                ),
-                # scores=np.zeros(6),
-                window_center=window_center,
-                window_width=window_width,
-                rescale_slope=rescale_slope,
-                rescale_intercept=rescale_intercept,
-                col=col2,
-                show_denoised=to_show_denoised,
-            )
-
-            col2.header(f"Scores:")
-            for c, s in zip(class_names, scores[slice_idx]):
-                col2.text(f"\t{c:16s} : {s:.3f}")
+            with col1:
+                plot_with_slider(
+                    slices=slices,
+                    scores=scores,
+                    segm_masks=segm_masks,
+                    denoised_images=denoised_images,
+                )
 
             if "plotter" in st.session_state:
-                with col3:
+                with col2:
                     show_plotter(st.session_state.plotter)
         else:
             st.write("No valid DICOM files were uploaded.")
