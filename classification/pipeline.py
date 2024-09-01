@@ -61,6 +61,7 @@ class ClassificationPipeline:
             model_type=self.mode,
             filename_checkpoint=filename_checkpoint,
             model_name=self.model_params.get("model_arch", "efficientnet"),
+            device=device,
         )
 
         self.device = device
@@ -69,7 +70,7 @@ class ClassificationPipeline:
 
         # add denoising model
         if denoising_checkpoint is not None:
-            self.denoiser = Denoiser.load_from_checkpoint(denoising_checkpoint)
+            self.denoiser = Denoiser.load_from_checkpoint(denoising_checkpoint, map_location=device)
             self.denoiser.eval()
             self.denoiser.to(self.device)
         else:
@@ -106,6 +107,7 @@ class ClassificationPipeline:
             self.seq_model = get_model(
                 model_type="seq",
                 filename_checkpoint=filename_checkpoint_seq,
+                device=device,
                 **self.seq_model_params["model_params"],
             )
             self.seq_model.eval()
@@ -139,6 +141,7 @@ class ClassificationPipeline:
                 out_dim=(1 if segm_n_classes is None else segm_n_classes),
                 mode=("3d" if segm_is_3d else "2d"),
                 filename_checkpoint=filename_checkpoint_segm,
+                device=device,
             )
             self.segm_model.eval()
             self.segm_model.to(self.device)

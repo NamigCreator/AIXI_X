@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 import pretrainedmodels
 import math
 
@@ -89,6 +89,7 @@ def get_model(
         model_type : Literal["2d_single_channel", "2d_multichannel", "3d", "seq", "segm"] = "2d_single_channel",
         filename_checkpoint : Optional[Path] = None,
         in_dim : int = 3,
+        device : Optional[Union[torch.device, Literal["cuda", "cpu"]]] = None,
         **kwargs,
         ) -> nn.Module:
     if model_type in ["2d_single_channel", "2d_multichannel"]:
@@ -105,7 +106,7 @@ def get_model(
         raise ValueError(f"Unknown model_type for model initialization: {model_type}")
     
     if filename_checkpoint is not None:
-        state_dict = torch.load(filename_checkpoint)["state_dict"]
+        state_dict = torch.load(filename_checkpoint, map_location=device)["state_dict"]
         state_dict = {k[6:]: v for k, v in state_dict.items() if k.startswith("model.")}
         model.load_state_dict(state_dict)
         model.eval()

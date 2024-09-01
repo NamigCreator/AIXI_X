@@ -239,11 +239,6 @@ def show_3d(
         stpyvista(pl, key="pv")
     return pl
 
-# @st.fragment
-def show_plotter(plotter: pv.Plotter):
-    stpyvista(plotter, key="pv")
-    return
-
 
 def calculate_mask_volume(
         slices: List[pydicom.FileDataset], 
@@ -438,7 +433,7 @@ def main():
                 slice.RescaleIntercept if "RescaleIntercept" in slice else -1024.0
             )
             
-            if segm_masks is not None and "plotter" not in st.session_state:
+            if segm_masks is not None:
                 plotter = show_3d(slices, segm_masks, as_mesh=True,
                     rescale_slope=rescale_slope, 
                     rescale_intercept=rescale_intercept,
@@ -462,7 +457,7 @@ def main():
 
             if "plotter" in st.session_state:
                 with col2:
-                    show_plotter(st.session_state.plotter)
+                    stpyvista(st.session_state.plotter)
         else:
             st.write("No valid DICOM files were uploaded.")
 
