@@ -297,7 +297,7 @@ class ClassificationPipeline:
                 p_id = batch["patient_id"]
 
                 if self.mode.startswith("2d"):
-                    images = batch["img"]
+                    images = batch["img"].to(torch.float32)
                     if embeds is None:
                         pred = self.plmodel.forward(images.to(self.device))
                     else:
@@ -306,7 +306,7 @@ class ClassificationPipeline:
                         )
                     preds_all.append(pred.cpu())
                 elif self.mode.startswith("3d"):
-                    images = batch["img"]
+                    images = batch["img"].to(torch.float32)
                     indexes_masked = batch["index_masked"]
                     pred, pred_patient = self.plmodel.forward(
                         images.to(self.device), indexes_masked
@@ -323,7 +323,7 @@ class ClassificationPipeline:
                     sop_id = np.concatenate(sop_id)
 
                 if self.segm_model is not None:
-                    images = batch["img"]
+                    images = batch["img"].to(torch.float32)
                     pred = self.plmodel_segm.forward(images.to(self.device))
                     pred = self.plmodel_segm.activation(pred)
                     segm_masks.append(pred.cpu())
@@ -420,7 +420,7 @@ class ClassificationPipeline:
             segm_masks = None
         else:
             segm_masks_final = None
-        if denoised_images is not None:
+        if denoised_images is not None and len(denoised_images) > 0:
             denoised_images_final = np.zeros(
                 (n_images,) + tuple(denoised_images.shape[1:]), np.float32
             )

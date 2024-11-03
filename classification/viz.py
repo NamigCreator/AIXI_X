@@ -261,7 +261,7 @@ def calculate_mask_volume(
         positions.append(slice.ImagePositionPatient[2])
     volumes = np.array(volumes)
     positions = np.diff(positions)
-    vol = np.sum(volumes[1:] * positions)
+    vol = np.sum(volumes[1:] * np.abs(positions))
     return vol / 1000
 
 
