@@ -25,6 +25,7 @@ from classification.data.misc import (
     change_image_size,
 )
 from classification.pipeline import ClassificationPipeline
+import classification.llm as llm 
 
 import ssl
 
@@ -330,8 +331,6 @@ def plot_with_slider(
             st.text(f"\t{c:16s} : {s:.3f}")
     return
 
-
-
 def main():
     # st.markdown("""
     #     <style>
@@ -363,6 +362,9 @@ def main():
             checkpoint_name="best",
             device="cpu",
         )
+        
+    if "llm_model" not in st.session_state:
+        st.session_state["llm_model"] = llm.load_model()
 
     model = st.session_state.model
 
@@ -440,10 +442,16 @@ def main():
                     show=False,
                 )
                 st.session_state.plotter = plotter
-
+                
         scores = st.session_state.scores
         segm_masks = st.session_state.get("segm_masks", None)
         denoised_images = st.session_state.get("denoised_images", None)
+        
+        if "llm_model" in st.session_state and ("llm_output" not in st.session_state or update_state):
+            selected_slice_inds = llm.select_representative_slices(scores)
+            sel_images = [slices[i] for i in selected_slice_inds]
+            output = llm.run_model_multiple(*st.session_state["llm_model"], sel_images)
+            st.session_state["llm_output"] = output
 
         if len(slices) > 0:
 
@@ -458,6 +466,9 @@ def main():
             if "plotter" in st.session_state:
                 with col2:
                     stpyvista(st.session_state.plotter)
+                    if "llm_output" in st.session_state:
+                        st.write(st.session_state.llm_output)
+                    
         else:
             st.write("No valid DICOM files were uploaded.")
 

@@ -21,6 +21,10 @@ conda install -y -c conda-forge vit-pytorch
 python3 -m pip install opencv-python
 python3 -m pip install streamlit
 python3 -m pip install stpyvista
+
+conda install transfomers
+conda install accelerate
+python3 -m pip install bitsandbytes
 ```
 
 ## Data preprocessing for training
