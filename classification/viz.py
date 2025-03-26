@@ -33,6 +33,7 @@ from classification.data.filter import FilterBrainPresent
 import ssl
 
 ssl._create_default_https_context = ssl._create_unverified_context
+pv.global_theme.transparent_background = True
 
 
 def load_dicom_files(uploaded_files: List[str]) -> List[pydicom.FileDataset]:
@@ -66,6 +67,7 @@ def show_slice_scores(
     col=None,
 ):
     fig, ax = plt.subplots()
+    # fig.patch.set_alpha(0.)
     image = convert_scores_to_colors(scores)
     ax.imshow(image)
     if select_index is not None:
@@ -89,18 +91,24 @@ def show_slice_scores(
 
 
 def show_slice(
-    slice: pydicom.FileDataset,
-    segm_mask: Optional[np.ndarray] = None,
-    denoised_img: Optional[np.ndarray] = None,
-    window_center: float = 40.0,
-    window_width: float = 80.0,
-    rescale_slope: float = 1.0,
-    rescale_intercept: float = -1024.0,
-    segm_mask_alpha: float = 0.3,
-    col=None,
-    show_denoised=False,
-):
-    fig, ax = plt.subplots(figsize=(3, 3))
+        slice: pydicom.FileDataset,
+        segm_mask: Optional[np.ndarray] = None,
+        denoised_img: Optional[np.ndarray] = None,
+        window_center: float = 40.0,
+        window_width: float = 80.0,
+        rescale_slope: float = 1.0,
+        rescale_intercept: float = -1024.0,
+        segm_mask_alpha: float = 0.3,
+        col=None,
+        show_denoised=False,
+        figsize : float = 3,
+        ):
+    # fig, ax = plt.subplots(figsize=(3, 3))
+    fig = plt.figure(figsize=(figsize, figsize))
+    ax = plt.Axes(fig, [0., 0., 1., 1.])
+    ax.set_axis_off()
+    fig.add_axes(ax)
+    fig.patch.set_alpha(0.)
     if not show_denoised:
         image = window_image(
             slice.pixel_array,
@@ -143,6 +151,7 @@ def show_3d(
         mask_opacity : float = 0.5,
         show : bool = False,
         flip_orientation : bool = True,
+        pv_window_width : Optional[float] = None,
         ):
     xvfb.start_xvfb()
 
@@ -182,8 +191,12 @@ def show_3d(
     # if flip_orientation:
     #     masks = np.flip(masks, axis=-1)
     #     image = np.flip(image, axis=-1)
-
-    pl = pv.Plotter()
+    
+    if pv_window_width is not None:
+        window_size = (pv_window_width, pv_window_width)
+    else:
+        window_size = None
+    pl = pv.Plotter(window_size=window_size)
     if as_mesh:
         verts, faces, _, _ = measure.marching_cubes(image, level=mesh_head_level, spacing=resolution)
         mesh = pv.PolyData.from_regular_faces(verts, faces)
@@ -228,19 +241,48 @@ def calculate_mask_volume(
     return vol / 1000
 
 
-@st.fragment
-def plot_with_slider(
-        slices: List[pydicom.FileDataset],
+# @st.fragment
+def add_sliders(
+        n_slices: int, 
+        init_index : Optional[int] = None,
+        add_segm_mask : bool = False,
+        add_denoised : bool = False,
+        ) -> Tuple[int, float, float, bool, bool]:
+    if init_index == 0:
+        init_index = n_slices // 2
+    slice_idx = st.slider(
+        "Select Slice", min_value=0, max_value=n_slices-1, 
+        value=init_index, step=1,
+    )
+    window_width = st.slider(
+        "Window Width", min_value=1, max_value=400, value=80, step=1
+    )
+    window_center = st.slider(
+        "Window Center", min_value=-100, max_value=300, value=40, step=1
+    )
+    if add_segm_mask:
+        to_show_segm = st.toggle("Show segmentation mask", True)
+    else:
+        to_show_segm = False
+    if add_denoised:
+        to_show_denoised = st.toggle("Show denoised image", False)
+    else:
+        to_show_denoised = False
+    return slice_idx, window_center, window_width, to_show_segm, to_show_denoised
+    
+    
+# @st.fragment
+def plot_2(
+        slices: List[pydicom.FileDataset], 
         scores: np.ndarray,
+        slice_idx : int = 0,
+        window_width : float = 80,
+        window_center : float = 40,
+        show_segm : bool = False,
+        show_denoised : bool = False,
         segm_masks : Optional[np.ndarray] = None,
         denoised_images : Optional[np.ndarray] = None,
         ):
-    top_score_index = scores[:, -1].argmax()
-    slice_idx = st.slider(
-        "Select Slice", min_value=0, max_value=len(slices) - 1, 
-        value=top_score_index, step=1,
-    )
-        
     show_slice_scores(scores, select_index=slice_idx)
 
     slice = slices[slice_idx]
@@ -248,34 +290,16 @@ def plot_with_slider(
     rescale_intercept = (
         slice.RescaleIntercept if "RescaleIntercept" in slice else -1024.0
     )
-    
-    expander = st.expander("Windows")
-    window_width = expander.slider(
-        "Window Width", min_value=1, max_value=400, value=80, step=1
-    )
-    window_center = expander.slider(
-        "Window Center", min_value=-100, max_value=300, value=40, step=1
-    )
-    
-    if segm_masks is not None:
-        to_show_segm = st.toggle("Show segmentation mask", True)
-    else:
-        to_show_segm = False
-    if denoised_images is not None:
-        to_show_denoised = st.toggle("Show denoised image", False)
-    else:
-        to_show_denoised = False
-    
     show_slice(
         slice=slice,
         segm_mask=(
             segm_masks[slice_idx]
-            if (segm_masks is not None and to_show_segm)
+            if (segm_masks is not None and show_segm)
             else None
         ),
         denoised_img=(
             denoised_images[slice_idx]
-            if (denoised_images is not None and to_show_denoised)
+            if (denoised_images is not None and show_denoised)
             else None
         ),
         # scores=np.zeros(6),
@@ -284,12 +308,42 @@ def plot_with_slider(
         rescale_slope=rescale_slope,
         rescale_intercept=rescale_intercept,
         # col=col2,
-        show_denoised=to_show_denoised,
+        show_denoised=show_denoised,
     )
     
     st.subheader(f"Slice scores:")
     score_strings = [f"{s:.2f}" for s in scores[slice_idx]]
     st.write(pd.DataFrame({"Type": class_names, "Score": score_strings}))
+    return
+
+
+@st.fragment
+def show_slices(
+        slices: List[pydicom.FileDataset],
+        scores: np.ndarray,
+        segm_masks : Optional[np.ndarray] = None,
+        denoised_images : Optional[np.ndarray] = None,
+        col_spec : List[float] = [2, 5],
+        ):
+    cols = st.columns(col_spec)
+    with cols[0]:
+        slice_idx, window_center, window_width, show_segm, show_denoised = add_sliders(
+            n_slices=len(slices), init_index=scores[:, -1].argmax(),
+            add_segm_mask=(segm_masks is not None),
+            add_denoised=(denoised_images is not None),
+        )
+    with cols[1]:
+        plot_2(
+            slices=slices,
+            scores=scores,
+            slice_idx=slice_idx,
+            window_center=window_center,
+            window_width=window_width,
+            show_segm=show_segm,
+            show_denoised=show_denoised,
+            segm_masks=segm_masks,
+            denoised_images=denoised_images,
+        )
     return
 
 
@@ -307,76 +361,34 @@ def write_study_scores(scores: np.ndarray, threshold : Optional[float] = None):
     return
 
 
-# @st.fragment
-# def plot_with_slider(
-#         slices: List[pydicom.FileDataset],
-#         scores: np.ndarray,
-#         segm_masks : Optional[np.ndarray] = None,
-#         denoised_images : Optional[np.ndarray] = None,
-#         patient_scores : Optional[np.ndarray] = None,
-#         ):
-#     col1, col2 = st.columns(2)
+
+@st.fragment
+def run_report_generation(
+        slices: List[pydicom.FileDataset], 
+        scores: np.ndarray,
+        rescale_intercept : float = -1024.,
+        rescale_slope : float = 1,
+        ):
+    st.header("Report Generation")
     
-#     with col1:
-#         slice_idx = st.slider(
-#             "Select Slice", min_value=0, max_value=len(slices) - 1, value=0, step=1
-#         )
+    with st.form(key="report_form"):
+        generate_report = st.form_submit_button(label="Generate")
+        
+    if generate_report:
+        sel_inds = [i for i, s in enumerate(slices) 
+            if FilterBrainPresent().filter(s.pixel_array, intercept=rescale_intercept, slope=rescale_slope) is not None]
+        sel_inds = np.asarray(sel_inds)
+        selected_slice_inds = llm.select_representative_slices(scores[sel_inds], score_threshold=None)
+        selected_slice_inds = sel_inds[selected_slice_inds]
+        sel_images = [slices[i] for i in selected_slice_inds]
+        sel_scores = scores[selected_slice_inds]
+        output = llm.run_model_multiple(*st.session_state["llm_model"], 
+            sel_images, scores=scores, volume=st.session_state.volume)
+        st.session_state["llm_output"] = output
+        
+        st.write(output)
+    return
 
-#         if segm_masks is not None:
-#             to_show_segm = st.toggle("Show segmentation mask", True)
-#         if denoised_images is not None:
-#             to_show_denoised = st.toggle("Show denoised image", False)
-
-#         show_slice_scores(scores, select_index=slice_idx)
-
-#         slice = slices[slice_idx]
-#         rescale_slope = slice.RescaleSlope if "RescaleSlope" in slice else 1
-#         rescale_intercept = (
-#             slice.RescaleIntercept if "RescaleIntercept" in slice else -1024.0
-#         )
-
-#         # Windowing parameters input
-#         expander = st.expander("Windows")
-#         window_width = expander.slider(
-#             "Window Width", min_value=1, max_value=400, value=80, step=1
-#         )
-#         window_center = expander.slider(
-#             "Window Center", min_value=-100, max_value=300, value=40, step=1
-#         )
-
-#         if "volume" in st.session_state:
-#             st.subheader(f"Hemorrhage volume: {st.session_state.volume:.1f}mL")
-#         if patient_scores is not None:
-#             st.subheader(f"Study scores:")
-#             score_strings = [f"{s:.2f}" for s in patient_scores]
-#             st.write(pd.DataFrame({"Type": class_names, "Score": score_strings}))
-
-#     with col2:
-#         show_slice(
-#             slice=slice,
-#             segm_mask=(
-#                 segm_masks[slice_idx]
-#                 if (segm_masks is not None and to_show_segm)
-#                 else None
-#             ),
-#             denoised_img=(
-#                 denoised_images[slice_idx]
-#                 if (denoised_images is not None and to_show_denoised)
-#                 else None
-#             ),
-#             # scores=np.zeros(6),
-#             window_center=window_center,
-#             window_width=window_width,
-#             rescale_slope=rescale_slope,
-#             rescale_intercept=rescale_intercept,
-#             # col=col2,
-#             show_denoised=to_show_denoised,
-#         )
-
-#         st.subheader(f"Slice scores:")
-#         score_strings = [f"{s:.2f}" for s in scores[slice_idx]]
-#         st.write(pd.DataFrame({"Type": class_names, "Score": score_strings}))
-#     return
 
 def main():
     title = "AISI X - AI Platform for Brain Diseases"
@@ -399,13 +411,19 @@ def main():
 
     st.markdown("""
     <style>
-               /* Remove blank space at top and bottom */ 
-               .block-container {
-                   padding-top: 1rem;
-                   padding-bottom: 0rem;
-                }
-
-        </style>
+        /* Remove blank space at top and bottom */ 
+        .block-container {
+            padding-top: 1rem;
+            padding-bottom: 0rem;
+        }
+        .stButton>button {
+            background-color: #1f77b4;
+            color: white;
+        }
+        .stHeader {
+            color: #1f77b4;
+        }
+    </style>
     """, unsafe_allow_html=True)
     st.title(title)
 
@@ -424,7 +442,7 @@ def main():
         st.session_state["llm_model"] = llm.load_model()
 
     model = st.session_state.model
-
+    
     with st.form("File upload", clear_on_submit=True):
         st.session_state["_uploaded_files"] = st.file_uploader(
             "Choose DICOM files",
@@ -433,11 +451,7 @@ def main():
         )
         st.session_state["_submitted"] = st.form_submit_button("submit")
 
-    # if st.session_state.model.segm_model is None:
-    #     col1 = st.columns(1)
-    # else:
-    #     col1, col2 = st.columns(spec=[2, 1])
-    col1, col2, col3 = st.columns(spec=[1, 1, 1])
+    col1, col2 = st.columns([7, 3])
 
     # if uploaded_files:
     if st.session_state.get("_submitted", False):
@@ -506,6 +520,7 @@ def main():
                     rescale_slope=rescale_slope, 
                     rescale_intercept=rescale_intercept,
                     show=False,
+                    pv_window_width=480,
                 )
                 st.session_state.plotter = plotter
                 
@@ -513,40 +528,11 @@ def main():
         segm_masks = st.session_state.get("segm_masks", None)
         denoised_images = st.session_state.get("denoised_images", None)
         patient_scores = st.session_state.get("patient_scores", None)
-        
-        if "llm_model" in st.session_state and ("llm_output" not in st.session_state or update_state):
-            sel_inds = [i for i, s in enumerate(slices) 
-                if FilterBrainPresent().filter(s.pixel_array, intercept=rescale_intercept, slope=rescale_slope) is not None]
-            sel_inds = np.asarray(sel_inds)
-            selected_slice_inds = llm.select_representative_slices(scores[sel_inds], score_threshold=None)
-            selected_slice_inds = sel_inds[selected_slice_inds]
-            sel_images = [slices[i] for i in selected_slice_inds]
-            sel_scores = scores[selected_slice_inds]
-            output = llm.run_model_multiple(*st.session_state["llm_model"], 
-                sel_images, scores=scores, volume=st.session_state.volume)
-            st.session_state["llm_output"] = output
 
         if len(slices) > 0:
-
-            # with col1:
-            #     plot_with_slider(
-            #         slices=slices,
-            #         scores=scores,
-            #         segm_masks=segm_masks,
-            #         denoised_images=denoised_images,
-            #         patient_scores=patient_scores,
-            #     )
-
-            # if "plotter" in st.session_state:
-            #     with col2:
-            #         stpyvista(st.session_state.plotter)
-            #         if "llm_output" in st.session_state:
-            #             s = st.session_state.llm_output
-            #             s = pd.DataFrame(json.loads(s[7:-3]))
-            #             st.table(s)
-            
+                
             with col1:
-                plot_with_slider(
+                show_slices(
                     slices=slices,
                     scores=scores,
                     segm_masks=segm_masks,
@@ -554,18 +540,28 @@ def main():
                 )
             
             with col2:
-                if "plotter" in st.session_state:
-                    with col2:
-                        stpyvista(st.session_state.plotter, panel_kwargs={"aspect_ratio": 1, "height": 720})
-                write_study_scores(patient_scores)
-                
-            with col3:
-                if "llm_output" in st.session_state:
-                    s = st.session_state.llm_output
-                    # s = pd.DataFrame(json.loads(s[7:-3]))
-                    # st.table(s)
-                    st.write(s)
+                if "llm_model" in st.session_state:
+                    tabs = st.tabs(["3D View", "Report"])
+                else:
+                    tabs = st.tabs["3D View"]
                     
+                with tabs[0]:
+                    if "plotter" in st.session_state:
+                        stpyvista(st.session_state.plotter, 
+                            panel_kwargs={"aspect_ratio": 1., "height": 400},
+                            use_container_width=False,
+                        )
+                    write_study_scores(patient_scores)
+                
+                if "llm_model" in st.session_state:
+                    with tabs[1]:
+                        run_report_generation(
+                            slices=slices,
+                            scores=scores,
+                            rescale_intercept=rescale_intercept,
+                            rescale_slope=rescale_slope,
+                        )
+                        
         else:
             st.write("No valid DICOM files were uploaded.")
 
