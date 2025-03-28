@@ -22,9 +22,11 @@ python3 -m pip install opencv-python
 python3 -m pip install streamlit
 python3 -m pip install stpyvista
 
-conda install transfomers
-conda install accelerate
+conda install -y transfomers
+conda install -y accelerate
 python3 -m pip install bitsandbytes
+
+conda install -y plotly
 ```
 
 ## Data preprocessing for training

@@ -14,6 +14,8 @@ from pyvista.plotting.utilities import xvfb
 from skimage import transform, measure
 import pandas as pd
 import json
+import plotly.graph_objects as go
+from PIL import Image
 
 
 _folder_current = Path(__file__).parent
@@ -60,33 +62,89 @@ def convert_scores_to_colors(
     return image
 
 
+# def show_slice_scores(
+#     scores: np.ndarray,
+#     class_names: Optional[List[str]] = class_names,
+#     select_index: Optional[int] = None,
+#     col=None,
+# ):
+#     fig, ax = plt.subplots()
+#     # fig.patch.set_alpha(0.)
+#     image = convert_scores_to_colors(scores)
+#     ax.imshow(image)
+#     if select_index is not None:
+#         rect = mpl.patches.Rectangle(
+#             (select_index - 0.5, -0.5),
+#             1.0,
+#             scores.shape[1],
+#             linewidth=1,
+#             edgecolor="black",
+#             facecolor="none",
+#         )
+#         ax.add_patch(rect)
+#     ax.set_yticks(np.arange(scores.shape[1]))
+#     if class_names is not None:
+#         ax.set_yticklabels(class_names)
+#     if col is None:
+#         st.pyplot(fig)
+#     else:
+#         col.pyplot(fig)
+#     return
+
+
+def hex_to_rgb(hex_color):
+    hex_color = hex_color.lstrip('#')
+    rgb_tuple = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    return list(rgb_tuple)
+
+
 def show_slice_scores(
-    scores: np.ndarray,
-    class_names: Optional[List[str]] = class_names,
-    select_index: Optional[int] = None,
-    col=None,
-):
-    fig, ax = plt.subplots()
-    # fig.patch.set_alpha(0.)
-    image = convert_scores_to_colors(scores)
-    ax.imshow(image)
+        scores: np.ndarray, 
+        class_names : Optional[List[str]] = class_names,
+        select_index : Optional[int] = None,
+        ):
+    primary_color = st.get_option("theme.primaryColor")
+    background_color = st.get_option("theme.backgroundColor")
+    text_color = st.get_option("theme.textColor")
+    primary_color_rgb = hex_to_rgb(primary_color)
+
+    colorscale = [
+        [0, f"rgba({primary_color_rgb[0]}, {primary_color_rgb[1]}, {primary_color_rgb[2]}, {0})"],
+        [1, f"rgba({primary_color_rgb[0]}, {primary_color_rgb[1]}, {primary_color_rgb[2]}, {1})"]
+    ]
+
+    fig = go.Figure(data=go.Heatmap(
+        z=scores.T,
+        x=np.arange(scores.shape[0]),
+        y=class_names,
+        colorscale=colorscale,
+        showscale=False,
+    ))
+
+    # Highlight the selected slice index
     if select_index is not None:
-        rect = mpl.patches.Rectangle(
-            (select_index - 0.5, -0.5),
-            1.0,
-            scores.shape[1],
-            linewidth=1,
-            edgecolor="black",
-            facecolor="none",
+        fig.add_vrect(
+            x0=select_index - 0.5, x1=select_index + 0.5,
+            y0=0, y1=1,
+            # fillcolor="red",
+            # opacity=0.3,
+            layer="above",
+            # line_width=0
+            line=dict(color=text_color, width=2),
+            name="Selected Slice",
         )
-        ax.add_patch(rect)
-    ax.set_yticks(np.arange(scores.shape[1]))
-    if class_names is not None:
-        ax.set_yticklabels(class_names)
-    if col is None:
-        st.pyplot(fig)
-    else:
-        col.pyplot(fig)
+
+    fig.update_layout(
+        xaxis_title="Slice Index",
+        yaxis_title="Class",
+        xaxis=dict(tickmode="linear"),
+        yaxis=dict(tickmode="array", tickvals=np.arange(len(class_names)), ticktext=class_names),
+        height=250,
+        margin=dict(l=20, r=20, t=20, b=20),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
     return
 
 
@@ -283,13 +341,12 @@ def plot_2(
         segm_masks : Optional[np.ndarray] = None,
         denoised_images : Optional[np.ndarray] = None,
         ):
-    show_slice_scores(scores, select_index=slice_idx)
-
     slice = slices[slice_idx]
     rescale_slope = slice.RescaleSlope if "RescaleSlope" in slice else 1
     rescale_intercept = (
         slice.RescaleIntercept if "RescaleIntercept" in slice else -1024.0
     )
+    
     show_slice(
         slice=slice,
         segm_mask=(
@@ -311,9 +368,12 @@ def plot_2(
         show_denoised=show_denoised,
     )
     
+    show_slice_scores(scores, select_index=slice_idx)
+
     st.subheader(f"Slice scores:")
     score_strings = [f"{s:.2f}" for s in scores[slice_idx]]
     st.write(pd.DataFrame({"Type": class_names, "Score": score_strings}))
+
     return
 
 
@@ -392,7 +452,8 @@ def run_report_generation(
 
 def main():
     title = "AISI X - AI Platform for Brain Diseases"
-    st.set_page_config(page_title=title, layout="wide")
+    favicon = Image.open("aisi_logo.png")
+    st.set_page_config(page_title=title, layout="wide", page_icon=favicon)
     # st.markdown("""
     #     <style>
     #         .header {
