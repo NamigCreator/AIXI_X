@@ -205,8 +205,8 @@ def show_3d(
         window_width : Optional[float] = None,
         rescale_slope : float = 1.,
         rescale_intercept : float = -1024.,
-        head_opacity : float = 0.2,
-        mask_opacity : float = 0.5,
+        head_opacity : float = 0.5,
+        mask_opacity : float = 0.9,
         show : bool = False,
         flip_orientation : bool = True,
         pv_window_width : Optional[float] = None,
@@ -255,6 +255,14 @@ def show_3d(
     else:
         window_size = None
     pl = pv.Plotter(window_size=window_size)
+    
+    bg_color = st.get_option("theme.backgroundColor")
+    if bg_color:
+        pl.set_background(bg_color)
+    else:
+        pl.set_background("white")
+    # pl.set_background(None)
+    
     if as_mesh:
         verts, faces, _, _ = measure.marching_cubes(image, level=mesh_head_level, spacing=resolution)
         mesh = pv.PolyData.from_regular_faces(verts, faces)
